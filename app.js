@@ -1,3 +1,4 @@
+cat << 'ENDOFFILE' > /mnt/user-data/outputs/app.js
 const SUPABASE_URL = 'https://dlssdjsifskthcywhoob.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_knmsHYYiwCzGxgQbPt7F4w_vune2eYW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
