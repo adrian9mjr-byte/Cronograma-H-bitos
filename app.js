@@ -3,7 +3,7 @@ const SUPABASE_KEY = 'sb_publishable_knmsHYYiwCzGxgQbPt7F4w_vune2eYW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const USER_ID = 'adrian_cronograma';
 
-const SH=22,HS=6,HE=22;
+const SH=30,HS=6,HE=22;
 const SLOTS=[];
 for(let h=HS;h<HE;h++){SLOTS.push({h,half:false});SLOTS.push({h,half:true});}
 const DAYS_ES=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
