@@ -519,6 +519,5 @@ function App(){
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+ReactDOM;createRoot(document.getElementById('root')).render(React.createElement(App));
 ENDOFFILE
-echo "OK"
