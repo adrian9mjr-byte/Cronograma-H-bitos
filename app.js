@@ -478,10 +478,6 @@ function App(){
               React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
               React.createElement('span',{style:{flex:1}},c.name),
               React.createElement('button',{onClick:e=>{e.stopPropagation();if(window.confirm(`¿Eliminar "${c.name}"?`))deleteCat(c.id);},style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',color:c.text,fontSize:11,padding:'0 2px'}},'✕')
-              React.createElement('div',{style:{flex:1}},
-              React.createElement('div',{style:{fontSize:12,fontWeight:500,color:c.text}},c.name),
-              React.createElement('div',{style:{fontSize:10,color:c.text,opacity:0.7}},`${fmtH(r.h,r.half||false)} · ${dl} · ${r.count} ocurrencias`)
-              ),
               React.createElement('button',{onClick:()=>deleteRepId(r.repId),style:{fontSize:10,padding:'3px 8px',border:`1px solid ${c.color}`,borderRadius:6,background:'transparent',color:c.text,cursor:'pointer',flexShrink:0}},'Borrar todas')
             );
           })),
