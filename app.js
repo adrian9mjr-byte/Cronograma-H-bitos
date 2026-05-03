@@ -512,10 +512,10 @@ function App(){
         React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
           React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
-       ) // Cierra el div contenedor de los botones (Línea 515)
-      ) // Cierra el div de la tarjeta (cardStyle)
-    ) // Cierra el div oscuro del fondo (overlayStyle) <-- ESTE FALTABA
-  ); // Cierra el div principal de tooooda la aplicación <-- ESTE FALTABA
-} // Cierra la función App()
+        )
+      )
+    )
+  );
+}
 
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
