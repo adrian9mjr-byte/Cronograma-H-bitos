@@ -232,6 +232,9 @@ function App(){
   function delEvt(dk,id){setEvts({...events,[dk]:(events[dk]||[]).filter(e=>String(e.id)!==String(id))});}
   function toggleDone(dk,id){setEvts({...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:!e.done}:e)});}
 
+  function deleteCat(id){
+  setCatsS(cats.filter(c=>c.id!==id));
+}
   function createCat(){
     if(!ncName.trim()) return;
     setCatsS([...cats,{id:'cat_'+Date.now(),name:ncName,...autoTheme(ncColor)}]);
@@ -394,8 +397,9 @@ function App(){
         ...cats.map(c=>React.createElement('div',{key:c.id,draggable:true,onDragStart:()=>setDragEvt({type:'new',catId:c.id}),
           onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:0}),
           style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,fontWeight:500,userSelect:'none',background:c.bg,color:c.text}},
-          React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),c.name
-        )),
+        React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
+        React.createElement('span',{style:{flex:1}},c.name),
+        React.createElement('button',{onClick:e=>{e.stopPropagation();if(window.confirm(`¿Eliminar "${c.name}"?`))deleteCat(c.id);},style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',color:c.text,fontSize:11,padding:'0 2px'}},'✕')
         React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,padding:5,border:'1px dashed #ccc',color:'#888'}},'+ Nueva categoria'),
         showNCF&&React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee'}},
           React.createElement(Lbl,{t:'Nombre'}),
@@ -474,9 +478,11 @@ function App(){
             const c=catById(r.cat),dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[r.dur]||'';
             return React.createElement('div',{key:r.repId,style:{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',borderRadius:8,border:`1px solid ${c.color}44`,background:c.bg,marginBottom:6}},
               React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
+              React.createElement('span',{style:{flex:1}},c.name),
+              React.createElement('button',{onClick:e=>{e.stopPropagation();if(window.confirm(`¿Eliminar "${c.name}"?`))deleteCat(c.id);},style:{marginLeft:'auto',background:'none',border:'none',cursor:'pointer',color:c.text,fontSize:11,padding:'0 2px'}},'✕')
               React.createElement('div',{style:{flex:1}},
-                React.createElement('div',{style:{fontSize:12,fontWeight:500,color:c.text}},c.name),
-                React.createElement('div',{style:{fontSize:10,color:c.text,opacity:0.7}},`${fmtH(r.h,r.half||false)} · ${dl} · ${r.count} ocurrencias`)
+              React.createElement('div',{style:{fontSize:12,fontWeight:500,color:c.text}},c.name),
+              React.createElement('div',{style:{fontSize:10,color:c.text,opacity:0.7}},`${fmtH(r.h,r.half||false)} · ${dl} · ${r.count} ocurrencias`)
               ),
               React.createElement('button',{onClick:()=>deleteRepId(r.repId),style:{fontSize:10,padding:'3px 8px',border:`1px solid ${c.color}`,borderRadius:6,background:'transparent',color:c.text,cursor:'pointer',flexShrink:0}},'Borrar todas')
             );
