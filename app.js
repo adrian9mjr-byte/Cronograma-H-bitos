@@ -395,11 +395,7 @@ function App(){
           style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,fontWeight:500,userSelect:'none',background:c.bg,color:c.text}
         },
           React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
-          React.createElement('span',{style:{flex:1}},c.name),
-          React.createElement('button',{
-            onClick:(e)=>{e.stopPropagation();if(window.confirm(`¿Eliminar categoría "${c.name}"?`))deleteCat(c.id);},
-            style:{background:'none',border:'none',cursor:'pointer',color:c.text,fontSize:11,padding:'0 2px'}
-          },'✕')
+          React.createElement('span',{style:{flex:1}},c.name)
         )),
         React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,padding:5,border:'1px dashed #ccc',color:'#888'}},'+ Nueva categoria'),
         showNCF&&React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee'}},
@@ -514,7 +510,18 @@ function App(){
         React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
           React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
-        )
+        ),
+        
+        // --- NUEVO BOTON ROJO DE BORRAR CATEGORIA ---
+        React.createElement('button',{
+          onClick:()=>{
+            if(window.confirm(`¿Estás seguro de que deseas eliminar la categoría "${catById(modal.cat).name}"?`)){
+              deleteCat(modal.cat);
+              setModal(null);
+            }
+          },
+          style:{...btnBase, width:'100%', marginTop:10, padding:'8px 0', background:'#E53935', color:'#fff', border:'none', fontWeight:500}
+        }, 'Borrar categoría')
       )
     )
   );
