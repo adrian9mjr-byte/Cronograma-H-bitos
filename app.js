@@ -473,4 +473,51 @@ function App(){
         repIds.length===0
           ?React.createElement('div',{style:{fontSize:12,color:'#999',textAlign:'center',padding:'20px 0'}},'No hay repeticiones activas.')
           :React.createElement(React.Fragment,null,...repIds.map(r=>{
-            const c=catById(r.cat),dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'
+            const c=catById(r.cat),dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[r.dur]||'';
+            return React.createElement('div',{key:r.repId,style:{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',borderRadius:8,border:`1px solid ${c.color}44`,background:c.bg,marginBottom:6}},
+              React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
+              React.createElement('div',{style:{flex:1}},
+                React.createElement('div',{style:{fontSize:12,fontWeight:500,color:c.text}},c.name),
+                React.createElement('div',{style:{fontSize:10,color:c.text,opacity:0.7}},`${fmtH(r.h,r.half||false)} · ${dl} · ${r.count} ocurrencias`)
+              ),
+              React.createElement('button',{onClick:()=>deleteRepId(r.repId),style:{fontSize:10,padding:'3px 8px',border:`1px solid ${c.color}`,borderRadius:6,background:'transparent',color:c.text,cursor:'pointer',flexShrink:0}},'Borrar todas')
+             );
+          })),
+        React.createElement('button',{onClick:()=>setShowRepMgr(false),style:{...btnBase,width:'100%',marginTop:8,fontSize:12,padding:'6px 0'}},'Cerrar')
+      )
+    ),
+
+    modal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setModal(null);},style:overlayStyle},
+      React.createElement('div',{style:cardStyle},
+        React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
+        React.createElement(Lbl,{t:'Categoria'}),
+        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:cats.map(c=>[c.id,c.name])}),
+        React.createElement(Lbl,{t:'Color'}),
+        React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4}},
+          React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:modal.color,border:'1px solid #ccc',flexShrink:0}}),
+          React.createElement('input',{type:'color',value:modal.color,onChange:e=>setModal({...modal,color:e.target.value}),style:{flex:1,height:28,padding:0,border:'none',background:'none',cursor:'pointer'}}),
+          React.createElement('button',{onClick:()=>setModal({...modal,color:catById(modal.cat).color}),style:{...btnBase,fontSize:10,padding:'3px 8px'}},'Reset')
+        ),
+        React.createElement(Lbl,{t:'Nota'}),
+        React.createElement(Inp,{val:modal.note,onChange:v=>setModal({...modal,note:v}),ph:'Descripcion...'}),
+        React.createElement(Lbl,{t:'Hora'}),
+        React.createElement(Sel,{val:`${modal.h}_${modal.half?1:0}`,onChange:v=>{const[h,hf]=v.split('_');setModal({...modal,h:parseInt(h),half:hf==='1'});},opts:SLOTS.map(s=>[`${s.h}_${s.half?1:0}`,fmtH(s.h,s.half)])}),
+        React.createElement(Lbl,{t:'Duracion'}),
+        React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
+        React.createElement(Lbl,{t:'🔔 Notificarme antes'}),
+        React.createElement(Sel,{val:modal.notif||0,onChange:v=>setModal({...modal,notif:parseInt(v)}),opts:[[0,'Sin notificacion'],[5,'5 minutos antes'],[10,'10 minutos antes'],[15,'15 minutos antes'],[30,'30 minutos antes'],[60,'1 hora antes']]}),
+        !modal.evtId&&React.createElement(React.Fragment,null,
+          React.createElement(Lbl,{t:'Repeticion'}),
+          React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
+          modal.rep==='custom'&&React.createElement(RepGrid,{days:modal.repDays,toggle:i=>setModal({...modal,repDays:modal.repDays.map((v,j)=>j===i?!v:v)})})
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
+          React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
+          React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
+        )
+      )
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
