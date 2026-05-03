@@ -514,7 +514,6 @@ function App(){
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
         )
       )
-    )
-  )
-}
+    }
+  }
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
