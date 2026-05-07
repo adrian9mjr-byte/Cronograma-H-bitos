@@ -3,8 +3,8 @@ const SUPABASE_KEY = 'sb_publishable_knmsHYYiwCzGxgQbPt7F4w_vune2eYW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const USER_ID = 'adrian_cronograma';
 
-// Ajuste visual: SH=30 para que los textos no se corten
-const SH=30,HS=6,HE=22;
+// Ajuste visual y de horario: HE=24 para que el día termine a las 11:30 PM
+const SH=30,HS=6,HE=24;
 const SLOTS=[];
 for(let h=HS;h<HE;h++){SLOTS.push({h,half:false});SLOTS.push({h,half:true});}
 const DAYS_ES=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
@@ -300,7 +300,8 @@ function App(){
       draggable:true,
       onDragStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
       onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
-      style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)'}
+      // Le decimos que ignore el ratón mientras se arrastra, para que la columna de abajo detecte el "soltar"
+      style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'}
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
         baseCat.name+(ev.note?` · ${ev.note}`:''+(ev.repId?' ↻':'')+(ev.notif?' 🔔':''))
@@ -317,17 +318,43 @@ function App(){
 
   function DayCol({dk}){
     const evts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
+    
+    // Nueva logica matemática para saber exactamente sobre qué bloque sueltas la actividad
+    const handleColDragOver = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const idx = Math.floor(y / SH);
+      const h = HS + Math.floor(idx / 2);
+      const half = idx % 2 !== 0;
+      if(h >= HS && h < HE) {
+         setDragOver(`${dk}_${h}_${half}`);
+      }
+    };
+
+    const handleColDrop = e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const idx = Math.floor(y / SH);
+      const h = HS + Math.floor(idx / 2);
+      const half = idx % 2 !== 0;
+      if(h >= HS && h < HE) {
+         handleDrop(dk, h, half);
+      }
+    };
+
     return React.createElement('div',{
       style:{position:'relative',borderLeft:'1px solid #e5e5e5',flex:1,minWidth:0},
-      onDragOver:e=>e.preventDefault(),
-      onDrop:e=>{e.preventDefault();handleDrop(dk,8,false);}
+      onDragOver: handleColDragOver,
+      onDragLeave:()=>setDragOver(null),
+      onDrop: handleColDrop
     },
       ...SLOTS.map((s,i)=>React.createElement('div',{
         key:i,
         style:{height:SH,borderBottom:s.half?'1px dashed #eee':'1px solid #e5e5e5',cursor:'pointer',background:dragOver===`${dk}_${s.h}_${s.half}`?'#d4f5e9':'transparent'},
-        onDragOver:e=>{e.preventDefault();e.stopPropagation();setDragOver(`${dk}_${s.h}_${s.half}`);},
-        onDragLeave:()=>setDragOver(null),
-        onDrop:e=>{e.preventDefault();e.stopPropagation();handleDrop(dk,s.h,s.half);},
         onClick:()=>!dragEvt&&setModal({dk,evtId:null,cat:'platzi',note:'',h:s.h,half:s.half,dur:2,color:'#1D9E75',rep:'none',repDays:[false,false,false,false,false,false,false],notif:0})
       })),
       ...evts.map(ev=>React.createElement(EvBlock,{key:ev.id,ev,dk}))
@@ -512,7 +539,6 @@ function App(){
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
         ),
         
-        // --- NUEVO BOTON ROJO DE BORRAR CATEGORIA ---
         React.createElement('button',{
           onClick:()=>{
             if(window.confirm(`¿Estás seguro de que deseas eliminar la categoría "${catById(modal.cat).name}"?`)){
