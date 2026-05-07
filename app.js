@@ -320,7 +320,7 @@ function App(){
     return React.createElement('div',{
       style:{position:'relative',borderLeft:'1px solid #e5e5e5',flex:1,minWidth:0},
       onDragOver:e=>e.preventDefault(),
-      onDrop:e=>{e.preventDefault();if(dragEvt&&dragEvt.type==='new')handleDrop(dk,8,false);}
+      onDrop:e=>{e.preventDefault();handleDrop(dk,8,false);}
     },
       ...SLOTS.map((s,i)=>React.createElement('div',{
         key:i,
