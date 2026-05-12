@@ -102,7 +102,6 @@ async function saveToDB(key,value){
 
 const {useState,useEffect,useRef}=React;
 
-// --- COMPONENTES VISUALES MOVIDOS FUERA DE APP() PARA NO PERDER EL FOCO ---
 const bi={width:'100%',fontSize:13,padding:'5px 7px',fontFamily:'system-ui',border:'1px solid #ccc',borderRadius:8,background:'#fff',color:'#1a1a1a',marginBottom:0,boxSizing:'border-box'};
 const Lbl=({t})=>React.createElement('label',{style:{fontSize:11,color:'#666',display:'block',marginBottom:3,marginTop:10}},t);
 const Sel=({val,onChange,opts})=>React.createElement('select',{value:val,onChange:e=>onChange(e.target.value),style:bi},opts.map(([v,l])=>React.createElement('option',{key:v,value:v},l)));
@@ -111,7 +110,6 @@ const InpDate=({val,onChange})=>React.createElement('input',{type:'date',value:v
 const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginTop:6}},
   DAYS_SH.map((d,i)=>React.createElement('div',{key:i,onClick:()=>toggle(i),style:{padding:'4px 0',textAlign:'center',fontSize:10,border:'1px solid #ccc',borderRadius:4,cursor:'pointer',background:days[i]?'#1a1a1a':'transparent',color:days[i]?'#fff':'#666'}},d))
 );
-// ---------------------------------------------------------------------------
 
 function App(){
   const [cats,setCats]=useState(DEFAULT_CATS);
@@ -128,7 +126,6 @@ function App(){
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
   
-  // Se agregó 'date' al estado inicial del formulario
   const [form,setForm]=useState({cat:'platzi',date:dateKey(today()),note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
   
   const [dragEvt,setDragEvt]=useState(null);
@@ -153,7 +150,6 @@ function App(){
     })();
   },[]);
 
-  // Efecto para sincronizar la fecha del formulario con la fecha que estamos viendo
   useEffect(() => {
     setForm(f => ({ ...f, date: dateKey(cursor) }));
   }, [cursor]);
@@ -216,14 +212,12 @@ function App(){
     return out;
   }
 
-  // Modificado para usar la fecha seleccionada en form.date
   function addFromForm(){
     const[h,hf]=form.hour.split('_');
     const half=hf==='1',hi=parseInt(h);
     const dk=form.date;
     let ne={...events};
     
-    // Fecha de inicio base usando form.date y un punto medio del día para evitar problemas de zona horaria
     const startDate = new Date(form.date + 'T12:00:00');
 
     if(form.rep==='none'){
@@ -313,11 +307,38 @@ function App(){
     };
     const top=slotIdx(ev.h,ev.half||false)*SH,height=ev.dur*SH-2;
     const dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[ev.dur]||'';
+
+    // MAGIA PASO 1: Calculamos la posición y el ancho según el algoritmo de colisión
+    const col = ev.col || 0;
+    const maxCols = ev.maxCols || 1;
+    const widthPct = 100 / maxCols;
+    const leftPct = col * widthPct;
+
     return React.createElement('div',{
       draggable:true,
       onDragStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
       onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
-      style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'}
+      style:{
+        position:'absolute',
+        left: `calc(${leftPct}% + 2px)`,
+        width: `calc(${widthPct}% - 4px)`,
+        top,
+        height,
+        borderRadius:5,
+        padding:'3px 5px',
+        cursor:'grab',
+        zIndex:2,
+        overflow:'hidden',
+        display:'flex',
+        flexDirection:'column',
+        justifyContent:'space-between',
+        background:th.bg,
+        color:th.text,
+        borderLeft:`3px solid ${th.color}`,
+        opacity:ev.done?0.5:1,
+        boxShadow:'0 1px 3px rgba(0,0,0,0.15)', 
+        pointerEvents: dragEvt ? 'none' : 'auto'
+      }
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
         baseCat.name+(ev.note?` · ${ev.note}`:''+(ev.repId?' ↻':'')+(ev.notif?' 🔔':''))
@@ -333,8 +354,51 @@ function App(){
   }
 
   function DayCol({dk}){
-    const evts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
+    const rawEvts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
     
+    // MAGIA PASO 1: Algoritmo de detección de colisiones (agrupa las que chocan)
+    const evts = [];
+    if(rawEvts.length > 0){
+      let lastEnd = null;
+      let group = [];
+
+      function packGroup() {
+        if(!group.length) return;
+        const cols = [];
+        group.forEach(ev => {
+          let placed = false;
+          for(let i=0; i<cols.length; i++){
+            if(cols[i][cols[i].length-1].end <= ev.start) {
+              cols[i].push(ev);
+              ev.col = i;
+              placed = true;
+              break;
+            }
+          }
+          if(!placed) {
+            ev.col = cols.length;
+            cols.push([ev]);
+          }
+        });
+        group.forEach(ev => {
+          ev.maxCols = cols.length;
+          evts.push(ev);
+        });
+        group = [];
+      }
+
+      rawEvts.forEach(raw => {
+        const ev = {...raw, start: slotIdx(raw.h, raw.half||false), end: slotIdx(raw.h, raw.half||false) + raw.dur};
+        if(lastEnd !== null && ev.start >= lastEnd) {
+          packGroup();
+          lastEnd = null;
+        }
+        group.push(ev);
+        if(lastEnd === null || ev.end > lastEnd) lastEnd = ev.end;
+      });
+      packGroup();
+    }
+
     const handleColDragOver = e => {
       e.preventDefault();
       e.stopPropagation();
