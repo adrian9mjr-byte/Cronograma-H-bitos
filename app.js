@@ -102,6 +102,14 @@ async function saveToDB(key,value){
 
 const {useState,useEffect,useRef}=React;
 
+ const bi={width:'100%',fontSize:13,padding:'5px 7px',fontFamily:'system-ui',border:'1px solid #ccc',borderRadius:8,background:'#fff',color:'#1a1a1a',marginBottom:0,boxSizing:'border-box'};
+  const Lbl=({t})=>React.createElement('label',{style:{fontSize:11,color:'#666',display:'block',marginBottom:3,marginTop:10}},t);
+  const Sel=({val,onChange,opts})=>React.createElement('select',{value:val,onChange:e=>onChange(e.target.value),style:bi},opts.map(([v,l])=>React.createElement('option',{key:v,value:v},l)));
+  const Inp=({val,onChange,ph})=>React.createElement('input',{value:val,onChange:e=>onChange(e.target.value),placeholder:ph,style:bi});
+  const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginTop:6}},
+    DAYS_SH.map((d,i)=>React.createElement('div',{key:i,onClick:()=>toggle(i),style:{padding:'4px 0',textAlign:'center',fontSize:10,border:'1px solid #ccc',borderRadius:4,cursor:'pointer',background:days[i]?'#1a1a1a':'transparent',color:days[i]?'#fff':'#666'}},d))
+  );
+
 function App(){
   const [cats,setCats]=useState(DEFAULT_CATS);
   const [events,setEvents]=useState({});
@@ -275,14 +283,7 @@ function App(){
   const catStats=cats.map(c=>{const ce=all.filter(e=>e.cat===c.id);return{...c,count:ce.length,done:ce.filter(e=>e.done).length,hrs:ce.reduce((s,e)=>s+e.dur*0.5,0)};}).filter(c=>c.count>0).sort((a,b)=>b.hrs-a.hrs);
   const repIds=getAllRepIds();
 
-  const bi={width:'100%',fontSize:13,padding:'5px 7px',fontFamily:'system-ui',border:'1px solid #ccc',borderRadius:8,background:'#fff',color:'#1a1a1a',marginBottom:0,boxSizing:'border-box'};
-  const Lbl=({t})=>React.createElement('label',{style:{fontSize:11,color:'#666',display:'block',marginBottom:3,marginTop:10}},t);
-  const Sel=({val,onChange,opts})=>React.createElement('select',{value:val,onChange:e=>onChange(e.target.value),style:bi},opts.map(([v,l])=>React.createElement('option',{key:v,value:v},l)));
-  const Inp=({val,onChange,ph})=>React.createElement('input',{value:val,onChange:e=>onChange(e.target.value),placeholder:ph,style:bi});
-  const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginTop:6}},
-    DAYS_SH.map((d,i)=>React.createElement('div',{key:i,onClick:()=>toggle(i),style:{padding:'4px 0',textAlign:'center',fontSize:10,border:'1px solid #ccc',borderRadius:4,cursor:'pointer',background:days[i]?'#1a1a1a':'transparent',color:days[i]?'#fff':'#666'}},d))
-  );
-
+ 
   function EvBlock({ev,dk}){
     const baseCat=catById(ev.cat);
     const th=ev.customTheme?{
