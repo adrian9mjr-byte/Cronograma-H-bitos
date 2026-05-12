@@ -102,13 +102,16 @@ async function saveToDB(key,value){
 
 const {useState,useEffect,useRef}=React;
 
- const bi={width:'100%',fontSize:13,padding:'5px 7px',fontFamily:'system-ui',border:'1px solid #ccc',borderRadius:8,background:'#fff',color:'#1a1a1a',marginBottom:0,boxSizing:'border-box'};
-  const Lbl=({t})=>React.createElement('label',{style:{fontSize:11,color:'#666',display:'block',marginBottom:3,marginTop:10}},t);
-  const Sel=({val,onChange,opts})=>React.createElement('select',{value:val,onChange:e=>onChange(e.target.value),style:bi},opts.map(([v,l])=>React.createElement('option',{key:v,value:v},l)));
-  const Inp=({val,onChange,ph})=>React.createElement('input',{value:val,onChange:e=>onChange(e.target.value),placeholder:ph,style:bi});
-  const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginTop:6}},
-    DAYS_SH.map((d,i)=>React.createElement('div',{key:i,onClick:()=>toggle(i),style:{padding:'4px 0',textAlign:'center',fontSize:10,border:'1px solid #ccc',borderRadius:4,cursor:'pointer',background:days[i]?'#1a1a1a':'transparent',color:days[i]?'#fff':'#666'}},d))
-  );
+// --- COMPONENTES VISUALES MOVIDOS FUERA DE APP() PARA NO PERDER EL FOCO ---
+const bi={width:'100%',fontSize:13,padding:'5px 7px',fontFamily:'system-ui',border:'1px solid #ccc',borderRadius:8,background:'#fff',color:'#1a1a1a',marginBottom:0,boxSizing:'border-box'};
+const Lbl=({t})=>React.createElement('label',{style:{fontSize:11,color:'#666',display:'block',marginBottom:3,marginTop:10}},t);
+const Sel=({val,onChange,opts})=>React.createElement('select',{value:val,onChange:e=>onChange(e.target.value),style:bi},opts.map(([v,l])=>React.createElement('option',{key:v,value:v},l)));
+const Inp=({val,onChange,ph})=>React.createElement('input',{value:val,onChange:e=>onChange(e.target.value),placeholder:ph,style:bi});
+const InpDate=({val,onChange})=>React.createElement('input',{type:'date',value:val,onChange:e=>onChange(e.target.value),style:bi});
+const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3,marginTop:6}},
+  DAYS_SH.map((d,i)=>React.createElement('div',{key:i,onClick:()=>toggle(i),style:{padding:'4px 0',textAlign:'center',fontSize:10,border:'1px solid #ccc',borderRadius:4,cursor:'pointer',background:days[i]?'#1a1a1a':'transparent',color:days[i]?'#fff':'#666'}},d))
+);
+// ---------------------------------------------------------------------------
 
 function App(){
   const [cats,setCats]=useState(DEFAULT_CATS);
@@ -124,7 +127,10 @@ function App(){
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
-  const [form,setForm]=useState({cat:'platzi',note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
+  
+  // Se agregó 'date' al estado inicial del formulario
+  const [form,setForm]=useState({cat:'platzi',date:dateKey(today()),note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
+  
   const [dragEvt,setDragEvt]=useState(null);
   const [dragOver,setDragOver]=useState(null);
   const saveTimer=useRef(null);
@@ -146,6 +152,11 @@ function App(){
       }
     })();
   },[]);
+
+  // Efecto para sincronizar la fecha del formulario con la fecha que estamos viendo
+  useEffect(() => {
+    setForm(f => ({ ...f, date: dateKey(cursor) }));
+  }, [cursor]);
 
   function scheduleSave(evts,ct){
     if(saveTimer.current) clearTimeout(saveTimer.current);
@@ -205,15 +216,21 @@ function App(){
     return out;
   }
 
+  // Modificado para usar la fecha seleccionada en form.date
   function addFromForm(){
     const[h,hf]=form.hour.split('_');
-    const half=hf==='1',hi=parseInt(h),dk=dateKey(cursor);
+    const half=hf==='1',hi=parseInt(h);
+    const dk=form.date;
     let ne={...events};
+    
+    // Fecha de inicio base usando form.date y un punto medio del día para evitar problemas de zona horaria
+    const startDate = new Date(form.date + 'T12:00:00');
+
     if(form.rep==='none'){
       if(!ne[dk]) ne[dk]=[];
       ne[dk]=[...ne[dk],{id:Date.now(),cat:form.cat,note:form.note,h:hi,half,dur:form.dur,done:false,notif:0}];
     } else {
-      ne=addRepEvts(ne,form.cat,form.note,hi,half,form.dur,form.rep,form.repDays,cursor,0);
+      ne=addRepEvts(ne,form.cat,form.note,hi,half,form.dur,form.rep,form.repDays,startDate,0);
     }
     setForm(f=>({...f,note:''}));
     setEvts(ne);
@@ -283,7 +300,6 @@ function App(){
   const catStats=cats.map(c=>{const ce=all.filter(e=>e.cat===c.id);return{...c,count:ce.length,done:ce.filter(e=>e.done).length,hrs:ce.reduce((s,e)=>s+e.dur*0.5,0)};}).filter(c=>c.count>0).sort((a,b)=>b.hrs-a.hrs);
   const repIds=getAllRepIds();
 
- 
   function EvBlock({ev,dk}){
     const baseCat=catById(ev.cat);
     const th=ev.customTheme?{
@@ -301,7 +317,6 @@ function App(){
       draggable:true,
       onDragStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
       onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
-      // Le decimos que ignore el ratón mientras se arrastra, para que la columna de abajo detecte el "soltar"
       style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'}
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
@@ -320,7 +335,6 @@ function App(){
   function DayCol({dk}){
     const evts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
     
-    // Nueva logica matemática para saber exactamente sobre qué bloque sueltas la actividad
     const handleColDragOver = e => {
       e.preventDefault();
       e.stopPropagation();
@@ -439,6 +453,10 @@ function App(){
         React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee',marginTop:2}},
           React.createElement(Lbl,{t:'Categoria'}),
           React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:cats.map(c=>[c.id,c.name])}),
+          
+          React.createElement(Lbl,{t:'Fecha'}),
+          React.createElement(InpDate,{val:form.date,onChange:v=>setForm(f=>({...f,date:v}))}),
+
           React.createElement(Lbl,{t:'Nota'}),
           React.createElement(Inp,{val:form.note,onChange:v=>setForm(f=>({...f,note:v})),ph:'Descripcion...'}),
           React.createElement(Lbl,{t:'Hora'}),
