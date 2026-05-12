@@ -38,6 +38,51 @@ function getRepDays(t,cd){
   return[];
 }
 
+// LECTOR DE ARCHIVOS .ICS DE GOOGLE CALENDAR
+function parseICSTime(str) {
+  const y = parseInt(str.substring(0,4));
+  const m = parseInt(str.substring(4,6)) - 1;
+  const d = parseInt(str.substring(6,8));
+  const h = parseInt(str.substring(9,11));
+  const min = parseInt(str.substring(11,13));
+  // Si termina en Z es UTC, sino usamos hora local de forma segura
+  if (str.endsWith('Z')) { return new Date(Date.UTC(y, m, d, h, min)); }
+  return new Date(y, m, d, h, min);
+}
+
+function parseICS(icsData) {
+  const lines = icsData.split(/\r\n|\n|\r/);
+  const events = [];
+  let currentEvent = null;
+  
+  // Para no saturar, solo traemos eventos desde hace 30 días en adelante
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  lines.forEach(line => {
+    if (line.startsWith('BEGIN:VEVENT')) {
+      currentEvent = {};
+    } else if (line.startsWith('END:VEVENT')) {
+      // Solo guardamos si tiene inicio, fin (no es de todo el día) y no es muy viejo
+      if (currentEvent && currentEvent.start && currentEvent.end && currentEvent.start > thirtyDaysAgo) {
+        events.push(currentEvent);
+      }
+      currentEvent = null;
+    } else if (currentEvent) {
+      if (line.startsWith('SUMMARY:')) {
+        currentEvent.summary = line.substring(8);
+      } else if (line.startsWith('DTSTART')) {
+        const match = line.match(/:(\d{8}T\d{6}Z?)/);
+        if (match) currentEvent.start = parseICSTime(match[1]);
+      } else if (line.startsWith('DTEND')) {
+        const match = line.match(/:(\d{8}T\d{6}Z?)/);
+        if (match) currentEvent.end = parseICSTime(match[1]);
+      }
+    }
+  });
+  return events.sort((a, b) => a.start - b.start);
+}
+
 function requestNotifPermission(){
   if('Notification' in window && Notification.permission==='default'){
     Notification.requestPermission();
@@ -119,6 +164,7 @@ function App(){
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
   const [loaded,setLoaded]=useState(false);
   const [modal,setModal]=useState(null);
+  const [importModal,setImportModal]=useState(null); // Nuevo estado para la ventana de aprobación
   const [showNCF,setShowNCF]=useState(false);
   const [showSum,setShowSum]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
@@ -170,6 +216,51 @@ function App(){
   function setEvts(e){setEvents(e);scheduleSave(e,cats);}
   function setCatsS(c){setCats(c);scheduleSave(events,c);}
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
+
+  // Función para manejar el archivo subido
+  function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const parsedEvents = parseICS(evt.target.result);
+      const defaultCat = cats[0].id;
+      setImportModal(parsedEvents.map(ev => ({
+        ...ev,
+        selected: true,
+        cat: defaultCat
+      })));
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Limpiar el input para volver a subir el mismo si se necesita
+  }
+
+  // Función para guardar los eventos seleccionados del modal
+  function saveImport() {
+    let ne = { ...events };
+    importModal.forEach(ev => {
+      if (!ev.selected) return;
+      const dk = dateKey(ev.start);
+      const h = ev.start.getHours();
+      const half = ev.start.getMinutes() >= 30;
+      
+      // Calcular duración en bloques de 30 mins
+      const durationMs = ev.end.getTime() - ev.start.getTime();
+      let dur = Math.round(durationMs / (1000 * 60 * 30));
+      if (dur < 1) dur = 1;
+
+      if (!ne[dk]) ne[dk] = [];
+      // Usamos propagación (...) para conservar las actividades manuales que ya tenías
+      ne[dk] = [...ne[dk], {
+        id: Date.now() + '_' + Math.random(),
+        cat: ev.cat,
+        note: ev.summary,
+        h, half, dur, done: false, notif: 0
+      }];
+    });
+    setEvts(ne);
+    setImportModal(null);
+  }
 
   function getAllRepIds(){
     const map={};
@@ -308,7 +399,6 @@ function App(){
     const top=slotIdx(ev.h,ev.half||false)*SH,height=ev.dur*SH-2;
     const dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[ev.dur]||'';
 
-    // MAGIA PASO 1: Calculamos la posición y el ancho según el algoritmo de colisión
     const col = ev.col || 0;
     const maxCols = ev.maxCols || 1;
     const widthPct = 100 / maxCols;
@@ -322,22 +412,9 @@ function App(){
         position:'absolute',
         left: `calc(${leftPct}% + 2px)`,
         width: `calc(${widthPct}% - 4px)`,
-        top,
-        height,
-        borderRadius:5,
-        padding:'3px 5px',
-        cursor:'grab',
-        zIndex:2,
-        overflow:'hidden',
-        display:'flex',
-        flexDirection:'column',
-        justifyContent:'space-between',
-        background:th.bg,
-        color:th.text,
-        borderLeft:`3px solid ${th.color}`,
-        opacity:ev.done?0.5:1,
-        boxShadow:'0 1px 3px rgba(0,0,0,0.15)', 
-        pointerEvents: dragEvt ? 'none' : 'auto'
+        top, height, borderRadius:5, padding:'3px 5px', cursor:'grab', zIndex:2, overflow:'hidden', display:'flex',
+        flexDirection:'column', justifyContent:'space-between', background:th.bg, color:th.text,
+        borderLeft:`3px solid ${th.color}`, opacity:ev.done?0.5:1, boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'
       }
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
@@ -356,7 +433,6 @@ function App(){
   function DayCol({dk}){
     const rawEvts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
     
-    // MAGIA PASO 1: Algoritmo de detección de colisiones (agrupa las que chocan)
     const evts = [];
     if(rawEvts.length > 0){
       let lastEnd = null;
@@ -400,36 +476,28 @@ function App(){
     }
 
     const handleColDragOver = e => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       const rect = e.currentTarget.getBoundingClientRect();
       const y = e.clientY - rect.top;
       const idx = Math.floor(y / SH);
       const h = HS + Math.floor(idx / 2);
       const half = idx % 2 !== 0;
-      if(h >= HS && h < HE) {
-         setDragOver(`${dk}_${h}_${half}`);
-      }
+      if(h >= HS && h < HE) { setDragOver(`${dk}_${h}_${half}`); }
     };
 
     const handleColDrop = e => {
-      e.preventDefault();
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       const rect = e.currentTarget.getBoundingClientRect();
       const y = e.clientY - rect.top;
       const idx = Math.floor(y / SH);
       const h = HS + Math.floor(idx / 2);
       const half = idx % 2 !== 0;
-      if(h >= HS && h < HE) {
-         handleDrop(dk, h, half);
-      }
+      if(h >= HS && h < HE) { handleDrop(dk, h, half); }
     };
 
     return React.createElement('div',{
       style:{position:'relative',borderLeft:'1px solid #e5e5e5',flex:1,minWidth:0},
-      onDragOver: handleColDragOver,
-      onDragLeave:()=>setDragOver(null),
-      onDrop: handleColDrop
+      onDragOver: handleColDragOver, onDragLeave:()=>setDragOver(null), onDrop: handleColDrop
     },
       ...SLOTS.map((s,i)=>React.createElement('div',{
         key:i,
@@ -492,6 +560,16 @@ function App(){
 
     React.createElement('div',{style:{display:'grid',gridTemplateColumns:'160px 1fr',gap:10}},
       React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:5}},
+        
+        // PASO 2: BOTÓN PARA IMPORTAR ICS A LA IZQUIERDA
+        React.createElement('div', {style: {background: '#eef2ff', borderRadius: 8, padding: 10, border: '1px solid #c7d2fe', marginBottom: 5}},
+          React.createElement('div', {style: {fontSize: 11, fontWeight: 600, color: '#3730a3', marginBottom: 5}}, 'Google Calendar'),
+          React.createElement('label', {style: {...btnBase, display: 'block', textAlign: 'center', background: '#4f46e5', color: '#fff', border: 'none', cursor: 'pointer', fontSize: 11}},
+            '📅 Importar .ics',
+            React.createElement('input', {type: 'file', accept: '.ics', style: {display: 'none'}, onChange: handleFileUpload})
+          )
+        ),
+
         React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'#999',textTransform:'uppercase',letterSpacing:'0.05em'}},'Actividades'),
         ...cats.map(c=>React.createElement('div',{
           key:c.id,
@@ -517,10 +595,8 @@ function App(){
         React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee',marginTop:2}},
           React.createElement(Lbl,{t:'Categoria'}),
           React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:cats.map(c=>[c.id,c.name])}),
-          
           React.createElement(Lbl,{t:'Fecha'}),
           React.createElement(InpDate,{val:form.date,onChange:v=>setForm(f=>({...f,date:v}))}),
-
           React.createElement(Lbl,{t:'Nota'}),
           React.createElement(Inp,{val:form.note,onChange:v=>setForm(f=>({...f,note:v})),ph:'Descripcion...'}),
           React.createElement(Lbl,{t:'Hora'}),
@@ -548,6 +624,41 @@ function App(){
             ...SLOTS.map((s,i)=>React.createElement('div',{key:i,style:{height:SH,display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'1px 4px 0 0',fontSize:9,color:'#bbb',flexShrink:0}},!s.half?fmtH(s.h,false):''))
           ),
           ...(view==='day'?[React.createElement(DayCol,{key:dateKey(cursor),dk:dateKey(cursor)})]:weekDays.map(d=>React.createElement(DayCol,{key:dateKey(d),dk:dateKey(d)})))
+        )
+      )
+    ),
+
+    // MODAL DE IMPORTACIÓN (Vista Previa - Enfoque A)
+    importModal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setImportModal(null);},style:overlayStyle},
+      React.createElement('div',{style:{...cardStyle, maxWidth: 450}},
+        React.createElement('div',{style:{fontSize:16,fontWeight:600,marginBottom:8}},'Revisar e Importar'),
+        React.createElement('div',{style:{fontSize:12,color:'#666',marginBottom:12}},`Se encontraron ${importModal.length} eventos. Desmarca los que no quieras añadir.`),
+        React.createElement('div',{style:{maxHeight:'50vh',overflowY:'auto', borderTop:'1px solid #eee', borderBottom:'1px solid #eee', padding:'5px 0', marginBottom:12}},
+          ...importModal.map((ev, i) => React.createElement('div', {key: i, style: {display: 'flex', gap: 10, alignItems: 'center', padding: '8px 4px', borderBottom: '1px solid #f5f5f5'}},
+            React.createElement('input', {type: 'checkbox', checked: ev.selected, style:{cursor:'pointer'}, onChange: e => {
+                const newModal = [...importModal];
+                newModal[i].selected = e.target.checked;
+                setImportModal(newModal);
+            }}),
+            React.createElement('div', {style: {flex: 1, minWidth:0}},
+                React.createElement('div', {style: {fontSize: 13, fontWeight: 500, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', color: ev.selected ? '#1a1a1a' : '#aaa'}}, ev.summary),
+                React.createElement('div', {style: {fontSize: 10, color: '#888'}}, `${ev.start.toLocaleDateString()} · ${fmtH(ev.start.getHours(), ev.start.getMinutes() >= 30)} a ${fmtH(ev.end.getHours(), ev.end.getMinutes() >= 30)}`)
+            ),
+            React.createElement('select', {
+              value: ev.cat,
+              disabled: !ev.selected,
+              onChange: e => {
+                  const newModal = [...importModal];
+                  newModal[i].cat = e.target.value;
+                  setImportModal(newModal);
+              },
+              style: { fontSize: 11, padding: '4px', borderRadius: 4, border: '1px solid #ccc', maxWidth: 100 }
+            }, cats.map(c => React.createElement('option', { key: c.id, value: c.id }, c.name)))
+          ))
+        ),
+        React.createElement('div',{style:{display:'flex',gap:8}},
+          React.createElement('button',{onClick:()=>setImportModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
+          React.createElement('button',{onClick:saveImport,style:{...btnBase,flex:1,padding:'7px 0',background:'#4f46e5',color:'#fff',border:'none'}},'Importar Seleccionados')
         )
       )
     ),
