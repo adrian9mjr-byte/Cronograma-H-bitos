@@ -22,7 +22,7 @@ const DEFAULT_CATS=[
 ];
 
 function today(){let d=new Date();d.setHours(0,0,0,0);return d;}
-function dateKey(d){return d.toISOString().slice(0,10);}
+function dateKey(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function addDays(d,n){let r=new Date(d);r.setDate(r.getDate()+n);return r;}
 function getWeekDays(d){let s=new Date(d);let day=s.getDay();let diff=day===0?-6:1-day;s.setDate(s.getDate()+diff);return Array.from({length:7},(_,i)=>addDays(s,i));}
 function fmtH(h,half){let ap=h>=12?'pm':'am';let hh=h>12?h-12:(h===0?12:h);return hh+(half?':30':':00')+ap;}
