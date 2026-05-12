@@ -3,7 +3,8 @@ const SUPABASE_KEY = 'sb_publishable_knmsHYYiwCzGxgQbPt7F4w_vune2eYW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const USER_ID = 'adrian_cronograma';
 
-const SH=30,HS=6,HE=24;
+// CAMBIO APLICADO: HE=23 hace que el último bloque de media hora inicie 22:30 y termine 23:00 (11 PM)
+const SH=30,HS=6,HE=23;
 const SLOTS=[];
 for(let h=HS;h<HE;h++){SLOTS.push({h,half:false});SLOTS.push({h,half:true});}
 const DAYS_ES=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
@@ -136,7 +137,7 @@ function App(){
         setNotifGranted(Notification.permission==='granted');
       }
 
-      // LA MAGIA PARA CELULARES: Inyectamos un polyfill que permite arrastrar manteniendo presionado
+      // CAMBIO APLICADO: Aumentado el Polyfill a 500ms para evitar falsos positivos al hacer scroll en celular
       if (!window._dragPolyfillLoaded && /Mobi|Android/i.test(navigator.userAgent)) {
         window._dragPolyfillLoaded = true;
         const link = document.createElement('link');
@@ -147,8 +148,7 @@ function App(){
         script.src = 'https://cdn.jsdelivr.net/npm/mobile-drag-drop@3.0.0-rc.0/index.min.js';
         script.onload = () => {
           if(window.MobileDragDrop) {
-             // 300ms de espera al presionar para empezar a arrastrar (así no rompe el scroll)
-             window.MobileDragDrop.polyfill({ holdToDrag: 300 }); 
+             window.MobileDragDrop.polyfill({ holdToDrag: 500 }); 
              window.addEventListener('touchmove', function(){}, {passive: false});
           }
         };
@@ -317,12 +317,17 @@ function App(){
     return React.createElement('div',{
       draggable:true,
       onDragStart:(e)=>{
-        // Requerido para que funcione el polyfill en celulares y firefox
         if(e.dataTransfer){e.dataTransfer.setData('text/plain', ''); e.dataTransfer.dropEffect='move';}
         setDragEvt({type:'existing',dk,id:ev.id});
       },
       onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
-      // Hace toda la tarjeta clickeable para abrir la ventana de edición
+      
+      // LA VERDADERA SOLUCION: Permitir que los bloques existentes también escuchen el evento "soltar"
+      // Si sueltas una actividad ENCIMA de otra actividad, automáticamente tomará el lugar (hora) de la que está debajo.
+      onDragOver:(e)=>{e.preventDefault();e.stopPropagation();setDragOver(`${dk}_${ev.h}_${ev.half}`);},
+      onDragLeave:()=>setDragOver(null),
+      onDrop:(e)=>{e.preventDefault();e.stopPropagation();handleDrop(dk,ev.h,ev.half);},
+
       onClick:()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0}),
       style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)'}
     },
@@ -331,7 +336,6 @@ function App(){
       ),
       React.createElement('div',{style:{fontSize:10,opacity:0.75,color:th.text}},fmtH(ev.h,ev.half||false)+' · '+dl),
       height>32&&React.createElement('div',{style:{display:'flex',gap:4,marginTop:1}},
-        // Botones más grandes (24px) y con stopPropagation para que no activen el onClick de la tarjeta
         [['✓',(e)=>{e.stopPropagation();toggleDone(dk,ev.id);},ev.done?th.color+'33':'rgba(0,0,0,0.1)'],
          ['✎',(e)=>{e.stopPropagation();setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0});},'rgba(0,0,0,0.1)'],
          ['✕',(e)=>{e.stopPropagation();delEvt(dk,ev.id);},'rgba(0,0,0,0.1)']
@@ -540,7 +544,6 @@ function App(){
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
         ),
         
-        // El botón rojo que AHORA borra únicamente la actividad agendada
         modal.evtId&&React.createElement('button',{
           onClick:()=>{
             if(window.confirm('¿Eliminar esta actividad del cronograma?')){
