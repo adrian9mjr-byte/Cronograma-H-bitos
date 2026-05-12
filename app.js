@@ -3,7 +3,6 @@ const SUPABASE_KEY = 'sb_publishable_knmsHYYiwCzGxgQbPt7F4w_vune2eYW';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 const USER_ID = 'adrian_cronograma';
 
-// Ajuste visual y de horario: HE=24 para que el día termine a las 11:30 PM
 const SH=30,HS=6,HE=24;
 const SLOTS=[];
 for(let h=HS;h<HE;h++){SLOTS.push({h,half:false});SLOTS.push({h,half:true});}
@@ -36,48 +35,6 @@ function getRepDays(t,cd){
   if(t==='weekend')return[0,6];
   if(t==='custom')return cd.reduce((a,v,i)=>v?[...a,i]:a,[]);
   return[];
-}
-
-function requestNotifPermission(){
-  if('Notification' in window && Notification.permission==='default'){
-    Notification.requestPermission();
-  }
-}
-
-function scheduleNotification(title, body, fireAt){
-  if(!('Notification' in window) || Notification.permission!=='granted') return null;
-  const delay = fireAt - Date.now();
-  if(delay < 0) return null;
-  return setTimeout(()=>{
-    new Notification(title, {body, icon: '/favicon.ico'});
-  }, delay);
-}
-
-function scheduleEventsNotifications(events, cats){
-  if(window._notifTimers){
-    window._notifTimers.forEach(t=>clearTimeout(t));
-  }
-  window._notifTimers = [];
-  if(!('Notification' in window) || Notification.permission!=='granted') return;
-  const now = new Date();
-  const todayStr = dateKey(now);
-  const tomorrowStr = dateKey(addDays(now, 1));
-  [todayStr, tomorrowStr].forEach(dk=>{
-    const evts = events[dk]||[];
-    evts.forEach(ev=>{
-      if(!ev.notif || ev.notif===0) return;
-      const catName = (cats.find(c=>c.id===ev.cat)||{name:ev.cat}).name;
-      const evDate = new Date(dk);
-      evDate.setHours(ev.h, ev.half?30:0, 0, 0);
-      const fireAt = evDate.getTime() - (ev.notif * 60 * 1000);
-      const t = scheduleNotification(
-        `⏰ ${catName}${ev.note?' - '+ev.note:''}`,
-        `Empieza en ${ev.notif} minuto${ev.notif>1?'s':''} (${fmtH(ev.h,ev.half||false)})`,
-        fireAt
-      );
-      if(t) window._notifTimers.push(t);
-    });
-  });
 }
 
 async function loadFromDB(){
@@ -113,7 +70,6 @@ function App(){
   const [showNCF,setShowNCF]=useState(false);
   const [showSum,setShowSum]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
-  const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
   const [form,setForm]=useState({cat:'platzi',note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
@@ -128,14 +84,10 @@ function App(){
         setEvents(data.events);
         setCats(data.cats);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
-        scheduleEventsNotifications(data.events, data.cats);
       }catch(e){
         setSync({dot:'#D85A30',msg:'Error al cargar'});
       }
       setLoaded(true);
-      if('Notification' in window){
-        setNotifGranted(Notification.permission==='granted');
-      }
     })();
   },[]);
 
@@ -147,7 +99,6 @@ function App(){
         await Promise.all([saveToDB('events',evts),saveToDB('cats',ct)]);
         const n=new Date();
         setSync({dot:'#1D9E75',msg:`Guardado ${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`});
-        scheduleEventsNotifications(evts,ct);
       }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar'});}
     },800);
   }
@@ -230,11 +181,7 @@ function App(){
 
   function delEvt(dk,id){setEvts({...events,[dk]:(events[dk]||[]).filter(e=>String(e.id)!==String(id))});}
   function toggleDone(dk,id){setEvts({...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:!e.done}:e)});}
-
-  function deleteCat(id){
-    setCatsS(cats.filter(c=>c.id!==id));
-  }
-
+  function deleteCat(id){setCatsS(cats.filter(c=>c.id!==id));}
   function createCat(){
     if(!ncName.trim()) return;
     setCatsS([...cats,{id:'cat_'+Date.now(),name:ncName,...autoTheme(ncColor)}]);
@@ -256,11 +203,6 @@ function App(){
       }
     }
     setDragEvt(null);setDragOver(null);setEvts(ne);
-  }
-
-  async function enableNotifications(){
-    const perm = await Notification.requestPermission();
-    setNotifGranted(perm==='granted');
   }
 
   const td=today(),weekDays=getWeekDays(cursor);
@@ -285,22 +227,16 @@ function App(){
 
   function EvBlock({ev,dk}){
     const baseCat=catById(ev.cat);
-    const th=ev.customTheme?{
-      bg:lighten(ev.customColor,0.85),
-      text:darken(ev.customColor,0.55),
-      color:ev.customColor
-    }:{
-      bg:baseCat.bg,
-      text:baseCat.text,
-      color:baseCat.color
-    };
+    const th=ev.customTheme?{bg:lighten(ev.customColor,0.85),text:darken(ev.customColor,0.55),color:ev.customColor}:{bg:baseCat.bg,text:baseCat.text,color:baseCat.color};
     const top=slotIdx(ev.h,ev.half||false)*SH,height=ev.dur*SH-2;
     const dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[ev.dur]||'';
+    
     return React.createElement('div',{
       draggable:true,
       onDragStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
-      onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
-      // Le decimos que ignore el ratón mientras se arrastra, para que la columna de abajo detecte el "soltar"
+      onDragEnd:()=>setDragEvt(null),
+      // Soporte táctil móvil
+      onTouchStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
       style:{position:'absolute',left:2,right:2,top,height,borderRadius:5,padding:'3px 5px',cursor:'grab',zIndex:2,overflow:'hidden',display:'flex',flexDirection:'column',justifyContent:'space-between',background:th.bg,color:th.text,borderLeft:`3px solid ${th.color}`,opacity:ev.done?0.5:1,boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'}
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
@@ -317,78 +253,68 @@ function App(){
   }
 
   function DayCol({dk}){
-    const evts=(events[dk]||[]).slice().sort((a,b)=>slotIdx(a.h,a.half||false)-slotIdx(b.h,b.half||false));
-    
-    // Nueva logica matemática para saber exactamente sobre qué bloque sueltas la actividad
-    const handleColDragOver = e => {
-      e.preventDefault();
-      e.stopPropagation();
+    const getPos = e => {
       const rect = e.currentTarget.getBoundingClientRect();
-      const y = e.clientY - rect.top;
+      const touch = e.touches ? e.touches[0] : e;
+      const y = touch.clientY - rect.top;
       const idx = Math.floor(y / SH);
-      const h = HS + Math.floor(idx / 2);
-      const half = idx % 2 !== 0;
-      if(h >= HS && h < HE) {
-         setDragOver(`${dk}_${h}_${half}`);
-      }
+      return { h: HS + Math.floor(idx / 2), half: idx % 2 !== 0 };
     };
 
-    const handleColDrop = e => {
-      e.preventDefault();
-      e.stopPropagation();
-      const rect = e.currentTarget.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      const idx = Math.floor(y / SH);
-      const h = HS + Math.floor(idx / 2);
-      const half = idx % 2 !== 0;
-      if(h >= HS && h < HE) {
-         handleDrop(dk, h, half);
-      }
+    const handleMove = e => {
+      if(!dragEvt) return;
+      if(e.cancelable) e.preventDefault(); // Bloquea scroll solo si arrastramos
+      const pos = getPos(e);
+      if(pos.h >= HS && pos.h < HE) setDragOver(`${dk}_${pos.h}_${pos.half}`);
+    };
+
+    const handleDropEnd = e => {
+      if(!dragEvt) return;
+      const pos = getPos(e.changedTouches ? {currentTarget: e.currentTarget, clientY: e.changedTouches[0].clientY} : e);
+      if(pos.h >= HS && pos.h < HE) handleDrop(dk, pos.h, pos.half);
     };
 
     return React.createElement('div',{
-      style:{position:'relative',borderLeft:'1px solid #e5e5e5',flex:1,minWidth:0},
-      onDragOver: handleColDragOver,
-      onDragLeave:()=>setDragOver(null),
-      onDrop: handleColDrop
+      style:{position:'relative',borderLeft:'1px solid #e5e5e5',flex:1,minWidth:0, touchAction: dragEvt ? 'none' : 'auto'},
+      onDragOver: e => { e.preventDefault(); handleMove(e); },
+      onDrop: handleDropEnd,
+      onTouchMove: handleMove,
+      onTouchEnd: handleDropEnd
     },
       ...SLOTS.map((s,i)=>React.createElement('div',{
         key:i,
         style:{height:SH,borderBottom:s.half?'1px dashed #eee':'1px solid #e5e5e5',cursor:'pointer',background:dragOver===`${dk}_${s.h}_${s.half}`?'#d4f5e9':'transparent'},
-        onClick:()=>!dragEvt&&setModal({dk,evtId:null,cat:'platzi',note:'',h:s.h,half:s.half,dur:2,color:'#1D9E75',rep:'none',repDays:[false,false,false,false,false,false,false],notif:0})
+        onClick:()=>!dragEvt&&setModal({dk,evtId:null,cat:'platzi',note:'',h:s.h,half:s.half,dur:2,color:'#1D9E75',notif:0})
       })),
-      ...evts.map(ev=>React.createElement(EvBlock,{key:ev.id,ev,dk}))
+      ...(events[dk]||[]).map(ev=>React.createElement(EvBlock,{key:ev.id,ev,dk}))
     );
   }
 
   const overlayStyle={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:9999,display:'flex',alignItems:'center',justifyContent:'center',padding:16};
-  const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto',WebkitOverflowScrolling:'touch'};
+  const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto'};
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
   if(!loaded) return React.createElement('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,color:'#666',fontSize:14}},
     React.createElement('div',{style:{width:28,height:28,border:'3px solid #eee',borderTopColor:'#1D9E75',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}),
-    React.createElement('span',null,'Cargando tu cronograma...'),
+    React.createElement('span',null,'Cargando...'),
     React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}}')
   );
 
   return React.createElement('div',{style:{padding:'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:900,margin:'0 auto'}},
-    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} *{box-sizing:border-box}'),
+    React.createElement('style',null,'*{box-sizing:border-box}'),
 
-    !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
-      React.createElement('span',{style:{flex:1}},'🔔 Activa las notificaciones para recibir alertas antes de tus actividades'),
-      React.createElement('button',{onClick:enableNotifications,style:{...btnBase,background:'#FF8F00',color:'#fff',border:'none',fontSize:11,padding:'4px 10px'}},'Activar')
-    ),
-
+    // Sync bar
     React.createElement('div',{style:{display:'flex',alignItems:'center',gap:6,padding:'6px 12px',background:'#fff',borderRadius:8,border:'1px solid #e5e5e5',marginBottom:10,fontSize:11,color:'#666'}},
       React.createElement('div',{style:{width:7,height:7,borderRadius:'50%',background:sync.dot,flexShrink:0}}),
       React.createElement('span',{style:{flex:1}},sync.msg),
       React.createElement('button',{onClick:()=>setShowRepMgr(true),style:{...btnBase,fontSize:10,padding:'2px 8px',color:'#666'}},`↻ Repeticiones (${repIds.length})`)
     ),
 
+    // Header
     React.createElement('div',{style:{padding:'12px 16px',background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:8}},
       React.createElement('div',null,
         React.createElement('div',{style:{fontSize:18,fontWeight:500}},`${DAYS_ES[td.getDay()]}, ${td.getDate()} de ${MON_ES[td.getMonth()]} ${td.getFullYear()}`),
-        React.createElement('div',{style:{fontSize:11,color:'#888',marginTop:2}},`Hoy tienes ${(events[dateKey(td)]||[]).length} actividad(es)`)
+        React.createElement('div',{style:{fontSize:11,color:'#888',marginTop:2}},`Hoy tienes ${(events[dateKey(td)]||[]).length} actividades`)
       ),
       React.createElement('div',{style:{display:'flex',gap:6,alignItems:'center'}},
         React.createElement('div',{style:{width:65,background:'#eee',borderRadius:99,height:5,overflow:'hidden'}},
@@ -398,6 +324,7 @@ function App(){
       )
     ),
 
+    // View/Nav
     React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,gap:8,flexWrap:'wrap'}},
       React.createElement('div',{style:{display:'flex',gap:4}},
         ['day','week'].map(v=>React.createElement('button',{key:v,onClick:()=>setView(v),style:{...btnBase,background:view===v?'#1a1a1a':'transparent',color:view===v?'#fff':'#666'}},v==='day'?'Dia':'Semana'))
@@ -405,149 +332,70 @@ function App(){
       React.createElement('div',{style:{display:'flex',alignItems:'center',gap:6}},
         React.createElement('button',{onClick:()=>setCursor(addDays(cursor,view==='day'?-1:-7)),style:btnBase},'←'),
         React.createElement('span',{style:{fontSize:12,fontWeight:500,minWidth:110,textAlign:'center'}},
-          view==='day'?(dateKey(cursor)===dateKey(td)?'Hoy':DAYS_SH[cursor.getDay()]+' '+cursor.getDate()+' '+MON_SH[cursor.getMonth()]):(getWeekDays(cursor)[0].getDate()+' '+MON_SH[getWeekDays(cursor)[0].getMonth()]+' — '+getWeekDays(cursor)[6].getDate()+' '+MON_SH[getWeekDays(cursor)[6].getMonth()])
+          view==='day'?(dateKey(cursor)===dateKey(td)?'Hoy':DAYS_SH[cursor.getDay()]+' '+cursor.getDate()):(getWeekDays(cursor)[0].getDate()+' '+MON_SH[getWeekDays(cursor)[0].getMonth()]+' — '+getWeekDays(cursor)[6].getDate())
         ),
         React.createElement('button',{onClick:()=>setCursor(addDays(cursor,view==='day'?1:7)),style:btnBase},'→')
       )
     ),
 
-    React.createElement('div',{style:{display:'grid',gridTemplateColumns:'160px 1fr',gap:10}},
+    React.createElement('div',{style:{display:'grid',gridTemplateColumns:window.innerWidth<600?'1fr':'160px 1fr',gap:10}},
       React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:5}},
-        React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'#999',textTransform:'uppercase',letterSpacing:'0.05em'}},'Actividades'),
+        React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'#999',textTransform:'uppercase'}},'Categorias'),
         ...cats.map(c=>React.createElement('div',{
           key:c.id,
           draggable:true,
           onDragStart:()=>setDragEvt({type:'new',catId:c.id}),
-          onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:0}),
-          style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,fontWeight:500,userSelect:'none',background:c.bg,color:c.text}
+          onTouchStart:()=>setDragEvt({type:'new',catId:c.id}),
+          onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,notif:0}),
+          style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,background:c.bg,color:c.text}
         },
           React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
           React.createElement('span',{style:{flex:1}},c.name)
         )),
-        React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,padding:5,border:'1px dashed #ccc',color:'#888'}},'+ Nueva categoria'),
+        React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,border:'1px dashed #ccc'}},'+ Nueva'),
         showNCF&&React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee'}},
-          React.createElement(Lbl,{t:'Nombre'}),
-          React.createElement(Inp,{val:ncName,onChange:setNcName,ph:'Mi actividad...'}),
-          React.createElement(Lbl,{t:'Color'}),
-          React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4,marginBottom:8}},
-            React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:ncColor,border:'1px solid #ccc',flexShrink:0}}),
-            React.createElement('input',{type:'color',value:ncColor,onChange:e=>setNcColor(e.target.value),style:{flex:1,height:28,padding:0,border:'none',background:'none',cursor:'pointer'}})
-          ),
-          React.createElement('button',{onClick:createCat,style:{...btnBase,width:'100%',fontSize:11,padding:6}},'Crear')
+          React.createElement(Inp,{val:ncName,onChange:setNcName,ph:'Nombre...'}),
+          React.createElement('input',{type:'color',value:ncColor,onChange:e=>setNcColor(e.target.value),style:{width:'100%',marginTop:5}}),
+          React.createElement('button',{onClick:createCat,style:{...btnBase,width:'100%',marginTop:5}},'Crear')
         ),
-        React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee',marginTop:2}},
-          React.createElement(Lbl,{t:'Categoria'}),
-          React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:cats.map(c=>[c.id,c.name])}),
-          React.createElement(Lbl,{t:'Nota'}),
-          React.createElement(Inp,{val:form.note,onChange:v=>setForm(f=>({...f,note:v})),ph:'Descripcion...'}),
-          React.createElement(Lbl,{t:'Hora'}),
-          React.createElement(Sel,{val:form.hour,onChange:v=>setForm(f=>({...f,hour:v})),opts:SLOTS.map(s=>[`${s.h}_${s.half?1:0}`,fmtH(s.h,s.half)])}),
-          React.createElement(Lbl,{t:'Duracion'}),
-          React.createElement(Sel,{val:form.dur,onChange:v=>setForm(f=>({...f,dur:parseInt(v)})),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
-          React.createElement(Lbl,{t:'Repetir'}),
-          React.createElement(Sel,{val:form.rep,onChange:v=>setForm(f=>({...f,rep:v})),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
-          form.rep==='custom'&&React.createElement(RepGrid,{days:form.repDays,toggle:i=>setForm(f=>({...f,repDays:f.repDays.map((v,j)=>j===i?!v:v)}))}),
-          React.createElement('button',{onClick:addFromForm,style:{...btnBase,width:'100%',fontSize:12,padding:6,marginTop:8}},'+ Agregar')
-        ),
-        React.createElement('button',{onClick:()=>setShowSum(!showSum),style:{...btnBase,fontSize:11,padding:'7px 10px'}},'Ver resumen ↗')
+        React.createElement('button',{onClick:()=>setShowSum(!showSum),style:{...btnBase,marginTop:10}},'Ver resumen ↗')
       ),
 
-      React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflow:'hidden'}},
-        view==='week'&&React.createElement('div',{style:{display:'grid',gridTemplateColumns:`44px repeat(7,1fr)`,borderBottom:'1px solid #e5e5e5'}},
+      React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflowX:'auto'}},
+        view==='week'&&React.createElement('div',{style:{display:'grid',gridTemplateColumns:`44px repeat(7,minmax(100px, 1fr))`,borderBottom:'1px solid #e5e5e5'}},
           React.createElement('div',null),
-          ...weekDays.map(d=>{const isT=dateKey(d)===dateKey(td);return React.createElement('div',{key:dateKey(d),style:{padding:'5px 3px',textAlign:'center',fontSize:10,color:isT?'#1D9E75':'#999',borderLeft:'1px solid #e5e5e5'}},
+          ...weekDays.map(d=>React.createElement('div',{key:dateKey(d),style:{padding:'5px 0',textAlign:'center',fontSize:10,borderLeft:'1px solid #e5e5e5'}},
             React.createElement('div',null,DAYS_SH[d.getDay()]),
-            React.createElement('div',{style:{fontSize:13,fontWeight:500,background:isT?'#1D9E75':'transparent',color:isT?'#fff':'#1a1a1a',borderRadius:'50%',width:22,height:22,display:'flex',alignItems:'center',justifyContent:'center',margin:'2px auto 0'}},d.getDate())
-          );})
+            React.createElement('div',{style:{fontWeight:600}},d.getDate())
+          ))
         ),
-        React.createElement('div',{style:{display:'grid',gridTemplateColumns:view==='day'?'44px 1fr':`44px repeat(7,1fr)`}},
-          React.createElement('div',{style:{display:'flex',flexDirection:'column'}},
-            ...SLOTS.map((s,i)=>React.createElement('div',{key:i,style:{height:SH,display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'1px 4px 0 0',fontSize:9,color:'#bbb',flexShrink:0}},!s.half?fmtH(s.h,false):''))
-          ),
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:view==='day'?'44px 1fr':`44px repeat(7,minmax(100px, 1fr))`}},
+          React.createElement('div',null,SLOTS.map((s,i)=>React.createElement('div',{key:i,style:{height:SH,fontSize:9,color:'#bbb',textAlign:'right',paddingRight:4}},!s.half?fmtH(s.h,false):''))),
           ...(view==='day'?[React.createElement(DayCol,{key:dateKey(cursor),dk:dateKey(cursor)})]:weekDays.map(d=>React.createElement(DayCol,{key:dateKey(d),dk:dateKey(d)})))
         )
       )
     ),
 
-    showSum&&React.createElement('div',{style:{marginTop:12,background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:14}},
-      React.createElement('div',{style:{fontSize:13,fontWeight:500,marginBottom:10}},'Resumen de progreso'),
-      React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:10}},
-        ...[['Actividades',sTotal],['Completadas',sDone],['Cumplimiento',sPct+'%'],['Horas plan.',tH.toFixed(1)+'h'],['Horas comp.',dH.toFixed(1)+'h'],['Pendientes',sTotal-sDone]].map(([l,v])=>
-          React.createElement('div',{key:l,style:{background:'#f9f9f9',borderRadius:8,padding:'7px 10px',border:'1px solid #eee'}},
-            React.createElement('div',{style:{fontSize:9,color:'#999',marginBottom:1}},l),
-            React.createElement('div',{style:{fontSize:17,fontWeight:500}},v)
-          )
-        )
-      ),
-      ...catStats.map(c=>React.createElement('div',{key:c.id,style:{display:'flex',alignItems:'center',gap:6,fontSize:11,marginBottom:4}},
-        React.createElement('span',{style:{minWidth:72,color:c.text}},c.name),
-        React.createElement('div',{style:{flex:1,height:4,background:'#eee',borderRadius:99,overflow:'hidden'}},
-          React.createElement('div',{style:{height:'100%',width:`${catStats[0]?.hrs?Math.round(c.hrs/catStats[0].hrs*100):0}%`,background:c.color,borderRadius:99}})
-        ),
-        React.createElement('span',{style:{minWidth:60,textAlign:'right',color:'#999',fontSize:11}},`${c.hrs.toFixed(1)}h · ${c.done}/${c.count}`)
-      )),
-      React.createElement('button',{onClick:()=>setShowSum(false),style:{...btnBase,marginTop:10,fontSize:11,padding:'5px 12px'}},'Cerrar')
-    ),
-
-    showRepMgr&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setShowRepMgr(false);},style:overlayStyle},
-      React.createElement('div',{style:cardStyle},
-        React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:4}},'↻ Gestionar repeticiones'),
-        React.createElement('div',{style:{fontSize:11,color:'#888',marginBottom:12}},'Elimina todas las ocurrencias de un solo toque.'),
-        repIds.length===0
-          ?React.createElement('div',{style:{fontSize:12,color:'#999',textAlign:'center',padding:'20px 0'}},'No hay repeticiones activas.')
-          :React.createElement(React.Fragment,null,...repIds.map(r=>{
-            const c=catById(r.cat),dl={1:'30m',2:'1h',3:'1.5h',4:'2h',6:'3h',8:'4h'}[r.dur]||'';
-            return React.createElement('div',{key:r.repId,style:{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',borderRadius:8,border:`1px solid ${c.color}44`,background:c.bg,marginBottom:6}},
-              React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
-              React.createElement('div',{style:{flex:1}},
-                React.createElement('div',{style:{fontSize:12,fontWeight:500,color:c.text}},c.name),
-                React.createElement('div',{style:{fontSize:10,color:c.text,opacity:0.7}},`${fmtH(r.h,r.half||false)} · ${dl} · ${r.count} ocurrencias`)
-              ),
-              React.createElement('button',{onClick:()=>deleteRepId(r.repId),style:{fontSize:10,padding:'3px 8px',border:`1px solid ${c.color}`,borderRadius:6,background:'transparent',color:c.text,cursor:'pointer',flexShrink:0}},'Borrar todas')
-             );
-          })),
-        React.createElement('button',{onClick:()=>setShowRepMgr(false),style:{...btnBase,width:'100%',marginTop:8,fontSize:12,padding:'6px 0'}},'Cerrar')
-      )
+    showSum&&React.createElement('div',{style:{marginTop:12,background:'#fff',borderRadius:12,padding:14}},
+      React.createElement('div',{style:{fontSize:13,fontWeight:500,marginBottom:10}},'Resumen'),
+      ...catStats.map(c=>React.createElement('div',{key:c.id,style:{fontSize:11,marginBottom:4}},`${c.name}: ${c.hrs.toFixed(1)}h`)),
+      React.createElement('button',{onClick:()=>setShowSum(false),style:btnBase},'Cerrar')
     ),
 
     modal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setModal(null);},style:overlayStyle},
       React.createElement('div',{style:cardStyle},
-        React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
-        React.createElement(Lbl,{t:'Categoria'}),
-        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:cats.map(c=>[c.id,c.name])}),
-        React.createElement(Lbl,{t:'Color'}),
-        React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4}},
-          React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:modal.color,border:'1px solid #ccc',flexShrink:0}}),
-          React.createElement('input',{type:'color',value:modal.color,onChange:e=>setModal({...modal,color:e.target.value}),style:{flex:1,height:28,padding:0,border:'none',background:'none',cursor:'pointer'}}),
-          React.createElement('button',{onClick:()=>setModal({...modal,color:catById(modal.cat).color}),style:{...btnBase,fontSize:10,padding:'3px 8px'}},'Reset')
-        ),
+        React.createElement('div',{style:{fontSize:14,fontWeight:600}},modal.evtId?'Editar':'Nueva'),
         React.createElement(Lbl,{t:'Nota'}),
-        React.createElement(Inp,{val:modal.note,onChange:v=>setModal({...modal,note:v}),ph:'Descripcion...'}),
+        React.createElement(Inp,{val:modal.note,onChange:v=>setModal({...modal,note:v}),ph:'...'}),
         React.createElement(Lbl,{t:'Hora'}),
         React.createElement(Sel,{val:`${modal.h}_${modal.half?1:0}`,onChange:v=>{const[h,hf]=v.split('_');setModal({...modal,h:parseInt(h),half:hf==='1'});},opts:SLOTS.map(s=>[`${s.h}_${s.half?1:0}`,fmtH(s.h,s.half)])}),
         React.createElement(Lbl,{t:'Duracion'}),
-        React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
-        React.createElement(Lbl,{t:'🔔 Notificarme antes'}),
-        React.createElement(Sel,{val:modal.notif||0,onChange:v=>setModal({...modal,notif:parseInt(v)}),opts:[[0,'Sin notificacion'],[5,'5 minutos antes'],[10,'10 minutos antes'],[15,'15 minutos antes'],[30,'30 minutos antes'],[60,'1 hora antes']]}),
-        !modal.evtId&&React.createElement(React.Fragment,null,
-          React.createElement(Lbl,{t:'Repeticion'}),
-          React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
-          modal.rep==='custom'&&React.createElement(RepGrid,{days:modal.repDays,toggle:i=>setModal({...modal,repDays:modal.repDays.map((v,j)=>j===i?!v:v)})})
-        ),
+        React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30m'],[2,'1h'],[4,'2h'],[6,'3h'],[8,'4h']]}),
         React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
-          React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
-          React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
+          React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1}},'Cancelar'),
+          React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,background:'#1a1a1a',color:'#fff'}},'Guardar')
         ),
-        
-        React.createElement('button',{
-          onClick:()=>{
-            if(window.confirm(`¿Estás seguro de que deseas eliminar la categoría "${catById(modal.cat).name}"?`)){
-              deleteCat(modal.cat);
-              setModal(null);
-            }
-          },
-          style:{...btnBase, width:'100%', marginTop:10, padding:'8px 0', background:'#E53935', color:'#fff', border:'none', fontWeight:500}
-        }, 'Borrar categoría')
+        React.createElement('button',{onClick:()=>{if(window.confirm('¿Borrar categoría?')){deleteCat(modal.cat);setModal(null);}},style:{...btnBase,width:'100%',marginTop:10,background:'#E53935',color:'#fff'}},'Borrar categoría')
       )
     )
   );
