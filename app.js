@@ -11,14 +11,70 @@ const DAYS_ES=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado
 const DAYS_SH=['Dom','Lun','Mar','Mie','Jue','Vie','Sab'];
 const MON_ES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
 const MON_SH=['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-const DEFAULT_CATS=[
+const PROJECT_CATS=[
+  {id:'movimiento',name:'Movimiento Real',color:'#0F766E',bg:'#CCFBF1',text:'#134E4A'},
+  {id:'exploracion',name:'Exploracion negocio',color:'#C2410C',bg:'#FFEDD5',text:'#7C2D12'},
   {id:'platzi',name:'Platzi',color:'#1D9E75',bg:'#E1F5EE',text:'#085041'},
-  {id:'pruebas',name:'Pruebas',color:'#D85A30',bg:'#FAECE7',text:'#4A1B0C'},
-  {id:'notas',name:'Mis Notas',color:'#7F77DD',bg:'#EEEDFE',text:'#26215C'},
+  {id:'utel',name:'UTEL',color:'#6D28D9',bg:'#EDE9FE',text:'#4C1D95'},
+  {id:'admin',name:'Administracion',color:'#A16207',bg:'#FEF3C7',text:'#78350F'},
+  {id:'mente',name:'Nutrir mente',color:'#7F77DD',bg:'#EEEDFE',text:'#26215C'},
   {id:'ejercicio',name:'Ejercicio',color:'#639922',bg:'#EAF3DE',text:'#173404'},
-  {id:'trabajo',name:'Trabajo',color:'#378ADD',bg:'#E6F1FB',text:'#042C53'},
-  {id:'descanso',name:'Descanso',color:'#888780',bg:'#F1EFE8',text:'#2C2C2A'},
-  {id:'relax',name:'Relax',color:'#D4537E',bg:'#FBEAF0',text:'#4B1528'},
+  {id:'trabajo',name:'Trabajo actual',color:'#378ADD',bg:'#E6F1FB',text:'#042C53'},
+  {id:'reset',name:'Reset',color:'#888780',bg:'#F1EFE8',text:'#2C2C2A'},
+  {id:'vida',name:'Vida personal',color:'#D4537E',bg:'#FBEAF0',text:'#4B1528'},
+  {id:'revision',name:'Revision semanal',color:'#475569',bg:'#E2E8F0',text:'#1E293B'},
+  {id:'notas',name:'Mis Notas',color:'#64748B',bg:'#F1F5F9',text:'#334155'},
+];
+const DEFAULT_CATS=PROJECT_CATS;
+const PLANNER_ID='movimiento-real-v1';
+const PLAN_START_MIN=8*60+30;
+const PLAN_END_MIN=22*60+30;
+
+function mergeProjectCats(saved=[]){
+  const byId=new Map((saved||[]).map(c=>[c.id,c]));
+  const ids=new Set(PROJECT_CATS.map(c=>c.id));
+  const merged=PROJECT_CATS.map(c=>({...c,...(byId.get(c.id)||{}),name:c.name}));
+  const extras=(saved||[]).filter(c=>!ids.has(c.id));
+  return [...merged,...extras];
+}
+
+const FIXED_ANCHORS=[
+  {id:'reunion_lunes',cat:'trabajo',note:'Reunion de trabajo actual',dow:1,h:10,half:false,dur:2},
+  {id:'oficina_martes',cat:'trabajo',note:'Oficina',dow:2,h:10,half:false,dur:10},
+  {id:'oficina_jueves',cat:'trabajo',note:'Oficina',dow:4,h:10,half:false,dur:10},
+  {id:'partido_jueves',cat:'ejercicio',note:'Partido de futbol',dow:4,h:19,half:false,dur:3},
+];
+
+const WEEKLY_TEMPLATES=[
+  {id:'balon_lunes',cat:'ejercicio',note:'Manejo de balon',count:1,dur:2,allowedDays:[1],priority:5,intensity:'medium'},
+  {id:'gym_miercoles',cat:'ejercicio',note:'Sesion de gym',count:1,dur:3,allowedDays:[3],priority:5,intensity:'medium'},
+  {id:'gym_sabado',cat:'ejercicio',note:'Sesion de gym',count:1,dur:3,allowedDays:[6],priority:5,intensity:'medium'},
+  {id:'cardio_domingo',cat:'ejercicio',note:'Cardio estatico',count:1,dur:2,allowedDays:[0],priority:5,intensity:'medium'},
+  {id:'mr_oferta',cat:'movimiento',note:'Terminar oferta suficientemente buena para mostrar',count:1,dur:3,allowedDays:[1,2,3,4,5],priority:10,intensity:'high'},
+  {id:'mr_construccion',cat:'movimiento',note:'Construir activo del sistema comercial',count:2,dur:2,allowedDays:[1,2,3,4,5,6],priority:9,intensity:'high'},
+  {id:'mr_externa',cat:'movimiento',note:'Accion externa: avanzar 10 prospectos / 5 contactos / 2 seguimientos',count:2,dur:2,allowedDays:[1,2,3,4,5,6],priority:10,intensity:'high',metric:'external'},
+  {id:'exploracion',cat:'exploracion',note:'Validar oportunidad (ej. drones): demanda, costos y numeros',count:1,dur:3,allowedDays:[1,2,3,4,5,6],priority:6,intensity:'high'},
+  {id:'platzi',cat:'platzi',note:'Platzi: cerrar curso actual y avanzar al certificado',count:5,dur:2,allowedDays:[1,2,3,4,5,6,0],priority:7,intensity:'medium',maxPerDay:1},
+  {id:'utel_revision',cat:'utel',note:'Revisar aula: clases, examenes y fechas',count:1,dur:1,allowedDays:[0],priority:9,intensity:'low'},
+  {id:'utel_bloque',cat:'utel',note:'UTEL: examen / actividad / clase',count:2,dur:2,allowedDays:[1,2,3,4,5,6],priority:8,intensity:'high',maxPerDay:1},
+  {id:'admin',cat:'admin',note:'Tramites, papeleo, notas y pendientes',count:2,dur:2,allowedDays:[1,2,3,4,5,6],priority:7,intensity:'medium',maxPerDay:1},
+  {id:'mente',cat:'mente',note:'Nutrir mente + guardar 1 idea util',count:5,dur:1,allowedDays:[1,2,3,4,5,6,0],priority:5,intensity:'low',maxPerDay:1,preferredStart:19*60},
+  {id:'reset',cat:'reset',note:'Reset: sin trabajo ni productividad',count:7,dur:1,allowedDays:[1,2,3,4,5,6,0],priority:8,intensity:'low',maxPerDay:1,preferredStart:15*60},
+  {id:'vida',cat:'vida',note:'Tiempo personal / pareja / familia sin trabajo',count:2,dur:3,allowedDays:[5,6,0,1,2,3,4],priority:3,intensity:'low',maxPerDay:1,preferredStart:18*60},
+  {id:'revision',cat:'revision',note:'Revisar semana + programar la siguiente',count:1,dur:2,allowedDays:[0],priority:10,intensity:'medium',preferredStart:18*60},
+];
+
+const WEEKLY_GOALS=[
+  {label:'Movimiento Real',target:5,match:e=>e.cat==='movimiento'},
+  {label:'Acciones externas',target:2,match:e=>e.metric==='external'},
+  {label:'Platzi',target:5,match:e=>e.cat==='platzi'},
+  {label:'UTEL',target:3,match:e=>e.cat==='utel'},
+  {label:'Administracion',target:2,match:e=>e.cat==='admin'},
+  {label:'Nutrir mente',target:5,match:e=>e.cat==='mente'},
+  {label:'Reset',target:7,match:e=>e.cat==='reset'},
+  {label:'Ejercicio',target:5,match:e=>e.cat==='ejercicio'},
+  {label:'Exploracion negocio',target:1,match:e=>e.cat==='exploracion'},
+  {label:'Revision semanal',target:1,match:e=>e.cat==='revision'},
 ];
 
 function today(){let d=new Date();d.setHours(0,0,0,0);return d;}
@@ -37,6 +93,28 @@ function getRepDays(t,cd){
   if(t==='custom')return cd.reduce((a,v,i)=>v?[...a,i]:a,[]);
   return[];
 }
+
+function slotToMinutes(h,half){return h*60+(half?30:0);}
+function minutesToSlot(m){const h=Math.floor(m/60),half=(m%60)>=30;return{h,half};}
+function eventEndMinutes(ev){return slotToMinutes(ev.h,ev.half||false)+(ev.dur||1)*30;}
+function overlaps(aStart,aEnd,bStart,bEnd){return aStart<bEnd&&bStart<aEnd;}
+function cloneEventsMap(src){
+  const out={};
+  Object.entries(src||{}).forEach(([dk,arr])=>{out[dk]=(arr||[]).map(e=>({...e}));});
+  return out;
+}
+function dateForDow(weekDays,dow){return weekDays.find(d=>d.getDay()===dow);}
+function isFreeAt(evMap,dk,startMin,dur){
+  const endMin=startMin+dur*30;
+  return !(evMap[dk]||[]).some(ev=>{
+    const buffer=ev.fixed?30:0; // deja aire antes/despues de compromisos fijos
+    return overlaps(startMin,endMin,slotToMinutes(ev.h,ev.half||false)-buffer,eventEndMinutes(ev)+buffer);
+  });
+}
+function countHoursForDay(evMap,dk){return (evMap[dk]||[]).reduce((s,e)=>s+(e.dur||1)*0.5,0);}
+function countTemplateForDay(evMap,dk,templateId){return (evMap[dk]||[]).filter(e=>e.templateId===templateId).length;}
+function countIntensityForDay(evMap,dk,intensity){return (evMap[dk]||[]).filter(e=>e.intensity===intensity).length;}
+function shuffled(arr){return arr.map(v=>({v,r:Math.random()})).sort((a,b)=>a.r-b.r).map(x=>x.v);}
 
 // LECTOR DE ARCHIVOS .ICS DE GOOGLE CALENDAR
 function parseICSTime(str) {
@@ -127,12 +205,13 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:DEFAULT_CATS};
-  const result={events:{},cats:DEFAULT_CATS};
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS)};
+  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS)};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
-    if(row.key==='cats') try{result.cats=JSON.parse(row.value);}catch(e){}
+    if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
   });
+  result.cats=mergeProjectCats(result.cats);
   return result;
 }
 
@@ -168,11 +247,12 @@ function App(){
   const [showNCF,setShowNCF]=useState(false);
   const [showSum,setShowSum]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
+  const [plannerMsg,setPlannerMsg]=useState('');
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
   
-  const [form,setForm]=useState({cat:'platzi',date:dateKey(today()),note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
+  const [form,setForm]=useState({cat:'movimiento',date:dateKey(today()),note:'',hour:'8_0',dur:2,rep:'none',repDays:[false,false,false,false,false,false,false]});
   
   const [dragEvt,setDragEvt]=useState(null);
   const [dragOver,setDragOver]=useState(null);
@@ -217,6 +297,103 @@ function App(){
   function setCatsS(c){setCats(c);scheduleSave(events,c);}
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
 
+  function getPlannerWeekDays(){
+    const td=today();
+    let base=new Date(cursor);
+    // Si estamos en el domingo actual, el plan se arma para la semana que empieza manana.
+    if(dateKey(base)===dateKey(td)&&base.getDay()===0) base=addDays(base,1);
+    return getWeekDays(base);
+  }
+
+  function ensureFixedAnchors(base,weekDays){
+    const out=cloneEventsMap(base);
+    FIXED_ANCHORS.forEach(a=>{
+      const d=dateForDow(weekDays,a.dow); if(!d) return;
+      const dk=dateKey(d); if(!out[dk]) out[dk]=[];
+      const exists=out[dk].some(e=>e.planner===PLANNER_ID&&e.templateId===a.id);
+      if(exists) return;
+      out[dk]=[...out[dk],{
+        id:'mr_fixed_'+Date.now()+'_'+Math.random(),cat:a.cat,note:a.note,h:a.h,half:a.half,dur:a.dur,
+        done:false,notif:0,fixed:true,planner:PLANNER_ID,templateId:a.id,tier:'fixed',intensity:'medium'
+      }];
+    });
+    return out;
+  }
+
+  function findBestPlannerSlot(evMap,weekDays,tpl){
+    const now=new Date();
+    const candidates=[];
+    weekDays.forEach(d=>{
+      if(!tpl.allowedDays.includes(d.getDay())) return;
+      const dk=dateKey(d);
+      const dayStart=new Date(d); dayStart.setHours(0,0,0,0);
+      const todayStart=today();
+      if(dayStart<todayStart) return;
+      if(tpl.maxPerDay&&countTemplateForDay(evMap,dk,tpl.id)>=tpl.maxPerDay) return;
+      for(let m=PLAN_START_MIN;m+tpl.dur*30<=PLAN_END_MIN;m+=30){
+        const when=new Date(d); when.setHours(Math.floor(m/60),m%60,0,0);
+        if(when.getTime()<now.getTime()+10*60*1000) continue;
+        if(!isFreeAt(evMap,dk,m,tpl.dur)) continue;
+        const dailyHours=countHoursForDay(evMap,dk);
+        const sameCat=(evMap[dk]||[]).filter(e=>e.cat===tpl.cat).length;
+        const highCount=countIntensityForDay(evMap,dk,'high');
+        let score=Math.random()*40;
+        score-=dailyHours*4;
+        score-=sameCat*8;
+        if(tpl.intensity==='high') score-=highCount*18;
+        if(tpl.intensity==='high'&&m>=20*60) score-=35;
+        if(tpl.cat==='movimiento'&&m>=9*60&&m<=19*60) score+=12;
+        if(tpl.metric==='external'&&m>=9*60&&m<=18*60) score+=18;
+        if(tpl.preferredStart!==undefined) score-=Math.abs(m-tpl.preferredStart)/30*1.5;
+        // Pequena recompensa por repartir la misma actividad en dias distintos.
+        score-=countTemplateForDay(evMap,dk,tpl.id)*25;
+        candidates.push({dk,m,score});
+      }
+    });
+    if(!candidates.length) return null;
+    candidates.sort((a,b)=>b.score-a.score);
+    return candidates[0];
+  }
+
+  function organizePlannerWeek(reorganize=false){
+    const weekDays=getPlannerWeekDays();
+    const keys=new Set(weekDays.map(dateKey));
+    let ne=cloneEventsMap(events);
+    if(reorganize){
+      keys.forEach(dk=>{
+        if(!ne[dk]) return;
+        ne[dk]=ne[dk].filter(e=>!(e.planner===PLANNER_ID&&!e.fixed&&!e.done));
+        if(!ne[dk].length) delete ne[dk];
+      });
+    }
+    ne=ensureFixedAnchors(ne,weekDays);
+    const unscheduled=[];
+    const ordered=[...WEEKLY_TEMPLATES].sort((a,b)=>(b.priority||0)-(a.priority||0));
+    ordered.forEach(tpl=>{
+      let existing=0;
+      weekDays.forEach(d=>{existing+=(ne[dateKey(d)]||[]).filter(e=>e.planner===PLANNER_ID&&e.templateId===tpl.id).length;});
+      const need=Math.max(0,tpl.count-existing);
+      for(let i=0;i<need;i++){
+        const slot=findBestPlannerSlot(ne,weekDays,tpl);
+        if(!slot){unscheduled.push(tpl.note);continue;}
+        const sh=minutesToSlot(slot.m);
+        if(!ne[slot.dk]) ne[slot.dk]=[];
+        ne[slot.dk]=[...ne[slot.dk],{
+          id:'mr_auto_'+Date.now()+'_'+Math.random(),cat:tpl.cat,note:tpl.note,h:sh.h,half:sh.half,dur:tpl.dur,
+          done:false,notif:0,fixed:false,planner:PLANNER_ID,templateId:tpl.id,tier:'flexible',
+          intensity:tpl.intensity||'low',metric:tpl.metric||null,priority:tpl.priority||0
+        }];
+      }
+    });
+    setEvts(ne);
+    setView('week');
+    setCursor(weekDays[0]);
+    const start=weekDays[0],end=weekDays[6];
+    setPlannerMsg(unscheduled.length
+      ?`Semana ${start.getDate()}-${end.getDate()}: organizada, pero quedaron ${unscheduled.length} actividad(es) sin espacio.`
+      :`Semana ${start.getDate()}-${end.getDate()}: plan listo. Fijas protegidas y flexibles distribuidas.`);
+  }
+
   // Función para manejar el archivo subido
   function handleFileUpload(e) {
     const file = e.target.files[0];
@@ -255,7 +432,7 @@ function App(){
         id: Date.now() + '_' + Math.random(),
         cat: ev.cat,
         note: ev.summary,
-        h, half, dur, done: false, notif: 0
+        h, half, dur, done: false, notif: 0, fixed: true, source: 'calendar-import'
       }];
     });
     setEvts(ne);
@@ -285,7 +462,7 @@ function App(){
     setShowRepMgr(false);
   }
 
-  function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif){
+  function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif,fixed=false){
     const rd=getRepDays(repType,cd);
     if(!rd.length) return base;
     const out={...base};
@@ -296,7 +473,7 @@ function App(){
       if(rd.includes(d.getDay())){
         const dk=dateKey(d);
         if(!out[dk]) out[dk]=[];
-        out[dk]=[...out[dk],{id:Date.now()+'_'+Math.random(),cat,note,h,half,dur,done:false,repId,notif:notif||0}];
+        out[dk]=[...out[dk],{id:Date.now()+'_'+Math.random(),cat,note,h,half,dur,done:false,repId,notif:notif||0,fixed:!!fixed}];
       }
       d=addDays(d,1);
     }
@@ -315,7 +492,7 @@ function App(){
       if(!ne[dk]) ne[dk]=[];
       ne[dk]=[...ne[dk],{id:Date.now(),cat:form.cat,note:form.note,h:hi,half,dur:form.dur,done:false,notif:0}];
     } else {
-      ne=addRepEvts(ne,form.cat,form.note,hi,half,form.dur,form.rep,form.repDays,startDate,0);
+      ne=addRepEvts(ne,form.cat,form.note,hi,half,form.dur,form.rep,form.repDays,startDate,0,false);
     }
     setForm(f=>({...f,note:''}));
     setEvts(ne);
@@ -326,13 +503,13 @@ function App(){
     const co=catById(modal.cat),uc=modal.color!==co.color,theme=uc?autoTheme(modal.color):null;
     let ne={...events};
     if(modal.evtId){
-      ne[modal.dk]=(ne[modal.dk]||[]).map(e=>String(e.id)===modal.evtId?{...e,cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0}:e);
+      ne[modal.dk]=(ne[modal.dk]||[]).map(e=>String(e.id)===modal.evtId?{...e,cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed}:e);
     } else {
       if(modal.rep==='none'){
         if(!ne[modal.dk]) ne[modal.dk]=[];
-        ne[modal.dk]=[...ne[modal.dk],{id:Date.now(),cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,done:false,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0}];
+        ne[modal.dk]=[...ne[modal.dk],{id:Date.now(),cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,done:false,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed}];
       } else {
-        ne=addRepEvts(ne,modal.cat,modal.note,modal.h,modal.half,modal.dur,modal.rep,modal.repDays,cursor,modal.notif||0);
+        ne=addRepEvts(ne,modal.cat,modal.note,modal.h,modal.half,modal.dur,modal.rep,modal.repDays,cursor,modal.notif||0,!!modal.fixed);
       }
     }
     setModal(null);setEvts(ne);
@@ -342,6 +519,10 @@ function App(){
   function toggleDone(dk,id){setEvts({...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:!e.done}:e)});}
 
   function deleteCat(id){
+    if(PROJECT_CATS.some(c=>c.id===id)){
+      window.alert('Esta categoria pertenece al sistema base de Movimiento Real y no se puede borrar. Puedes cambiar el color de una actividad individual si lo necesitas.');
+      return;
+    }
     setCatsS(cats.filter(c=>c.id!==id));
   }
 
@@ -360,6 +541,7 @@ function App(){
     } else {
       const src=ne[dragEvt.dk]||[],ev=src.find(e=>String(e.id)===String(dragEvt.id));
       if(ev){
+        if(ev.fixed){ setDragEvt(null); setDragOver(null); return; }
         ne[dragEvt.dk]=src.filter(e=>String(e.id)!==String(dragEvt.id));
         if(!ne[dk]) ne[dk]=[];
         ne[dk]=[...ne[dk],{...ev,h,half}];
@@ -384,6 +566,13 @@ function App(){
   const tH=all.reduce((s,e)=>s+e.dur*0.5,0),dH=all.filter(e=>e.done).reduce((s,e)=>s+e.dur*0.5,0);
   const catStats=cats.map(c=>{const ce=all.filter(e=>e.cat===c.id);return{...c,count:ce.length,done:ce.filter(e=>e.done).length,hrs:ce.reduce((s,e)=>s+e.dur*0.5,0)};}).filter(c=>c.count>0).sort((a,b)=>b.hrs-a.hrs);
   const repIds=getAllRepIds();
+  const weekKeys=weekDays.map(dateKey);
+  const weekAll=[];
+  weekKeys.forEach(dk=>(events[dk]||[]).forEach(e=>weekAll.push({...e,dk})));
+  const weekGoalStats=WEEKLY_GOALS.map(g=>{
+    const matched=weekAll.filter(g.match);
+    return {...g,planned:matched.length,done:matched.filter(e=>e.done).length};
+  });
 
   function EvBlock({ev,dk}){
     const baseCat=catById(ev.cat);
@@ -405,25 +594,25 @@ function App(){
     const leftPct = col * widthPct;
 
     return React.createElement('div',{
-      draggable:true,
-      onDragStart:()=>setDragEvt({type:'existing',dk,id:ev.id}),
+      draggable:!ev.fixed,
+      onDragStart:()=>{if(!ev.fixed)setDragEvt({type:'existing',dk,id:ev.id});},
       onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
       style:{
         position:'absolute',
         left: `calc(${leftPct}% + 2px)`,
         width: `calc(${widthPct}% - 4px)`,
-        top, height, borderRadius:5, padding:'3px 5px', cursor:'grab', zIndex:2, overflow:'hidden', display:'flex',
+        top, height, borderRadius:5, padding:'3px 5px', cursor:ev.fixed?'default':'grab', zIndex:2, overflow:'hidden', display:'flex',
         flexDirection:'column', justifyContent:'space-between', background:th.bg, color:th.text,
         borderLeft:`3px solid ${th.color}`, opacity:ev.done?0.5:1, boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'
       }
     },
       React.createElement('div',{style:{fontSize:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.3,color:th.text}},
-        baseCat.name+(ev.note?` · ${ev.note}`:''+(ev.repId?' ↻':'')+(ev.notif?' 🔔':''))
+        baseCat.name+(ev.note?` · ${ev.note}`:'')+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'')
       ),
       React.createElement('div',{style:{fontSize:10,opacity:0.75,color:th.text}},fmtH(ev.h,ev.half||false)+' · '+dl),
       height>32&&React.createElement('div',{style:{display:'flex',gap:2,marginTop:1}},
         [['✓',()=>toggleDone(dk,ev.id),ev.done?th.color+'33':'rgba(0,0,0,0.1)'],
-         ['✎',()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0}),'rgba(0,0,0,0.1)'],
+         ['✎',()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed}),'rgba(0,0,0,0.1)'],
          ['✕',()=>delEvt(dk,ev.id),'rgba(0,0,0,0.1)']
         ].map(([ico,fn,bg])=>React.createElement('button',{key:ico,onClick:fn,style:{width:14,height:14,borderRadius:3,border:'none',cursor:'pointer',fontSize:8,display:'flex',alignItems:'center',justifyContent:'center',background:bg,color:th.text,padding:0,flexShrink:0}},ico))
       )
@@ -502,7 +691,7 @@ function App(){
       ...SLOTS.map((s,i)=>React.createElement('div',{
         key:i,
         style:{height:SH,borderBottom:s.half?'1px dashed #eee':'1px solid #e5e5e5',cursor:'pointer',background:dragOver===`${dk}_${s.h}_${s.half}`?'#d4f5e9':'transparent'},
-        onClick:()=>!dragEvt&&setModal({dk,evtId:null,cat:'platzi',note:'',h:s.h,half:s.half,dur:2,color:'#1D9E75',rep:'none',repDays:[false,false,false,false,false,false,false],notif:0})
+        onClick:()=>!dragEvt&&setModal({dk,evtId:null,cat:'platzi',note:'',h:s.h,half:s.half,dur:2,color:'#1D9E75',rep:'none',repDays:[false,false,false,false,false,false,false],notif:0,fixed:false})
       })),
       ...evts.map(ev=>React.createElement(EvBlock,{key:ev.id,ev,dk}))
     );
@@ -561,6 +750,17 @@ function App(){
     React.createElement('div',{style:{display:'grid',gridTemplateColumns:'160px 1fr',gap:10}},
       React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:5}},
         
+        React.createElement('div',{style:{background:'#ecfeff',borderRadius:8,padding:10,border:'1px solid #99f6e4',marginBottom:5}},
+          React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59',marginBottom:3}},'Proyecto Movimiento Real · V1'),
+          React.createElement('div',{style:{fontSize:9,color:'#0f766e',lineHeight:1.35,marginBottom:4}},
+            (()=>{const w=getPlannerWeekDays();return `Planifica ${w[0].getDate()} ${MON_SH[w[0].getMonth()]} — ${w[6].getDate()} ${MON_SH[w[6].getMonth()]}`;})()
+          ),
+          React.createElement('div',{style:{fontSize:9,color:'#134e4a',lineHeight:1.35,marginBottom:7}},'Mision: oferta usable + 10 prospectos + 5 contactos + 2 seguimientos + 1 certificado Platzi.'),
+          React.createElement('button',{onClick:()=>organizePlannerWeek(false),style:{...btnBase,width:'100%',fontSize:11,padding:'7px 6px',background:'#0f766e',color:'#fff',border:'none',marginBottom:5}},'🎲 Organizar semana'),
+          React.createElement('button',{onClick:()=>{if(window.confirm('¿Reorganizar las actividades flexibles de esta semana? Las fijas y las ya completadas no se moveran.'))organizePlannerWeek(true);},style:{...btnBase,width:'100%',fontSize:10,padding:'5px 6px',background:'#fff',color:'#0f766e',border:'1px solid #5eead4'}},'↻ Reorganizar flexibles'),
+          plannerMsg&&React.createElement('div',{style:{fontSize:9,color:'#115e59',lineHeight:1.35,marginTop:6}},plannerMsg)
+        ),
+
         // PASO 2: BOTÓN PARA IMPORTAR ICS A LA IZQUIERDA
         React.createElement('div', {style: {background: '#eef2ff', borderRadius: 8, padding: 10, border: '1px solid #c7d2fe', marginBottom: 5}},
           React.createElement('div', {style: {fontSize: 11, fontWeight: 600, color: '#3730a3', marginBottom: 5}}, 'Google Calendar'),
@@ -575,7 +775,7 @@ function App(){
           key:c.id,
           draggable:true,
           onDragStart:()=>setDragEvt({type:'new',catId:c.id}),
-          onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:0}),
+          onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:0,fixed:false}),
           style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,fontWeight:500,userSelect:'none',background:c.bg,color:c.text}
         },
           React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
@@ -665,6 +865,13 @@ function App(){
 
     showSum&&React.createElement('div',{style:{marginTop:12,background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:14}},
       React.createElement('div',{style:{fontSize:13,fontWeight:500,marginBottom:10}},'Resumen de progreso'),
+      React.createElement('div',{style:{background:'#ecfeff',border:'1px solid #99f6e4',borderRadius:10,padding:10,marginBottom:12}},
+        React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59',marginBottom:7}},'Metas de esta semana'),
+        ...weekGoalStats.map(g=>React.createElement('div',{key:g.label,style:{display:'grid',gridTemplateColumns:'1fr auto',gap:8,alignItems:'center',fontSize:10,marginBottom:4}},
+          React.createElement('span',{style:{color:'#134e4a'}},g.label),
+          React.createElement('span',{style:{fontWeight:700,color:g.done>=g.target?'#166534':'#0f766e'}},`${g.done}/${g.target} hechas · ${g.planned} plan.`)
+        ))
+      ),
       React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:10}},
         ...[['Actividades',sTotal],['Completadas',sDone],['Cumplimiento',sPct+'%'],['Horas plan.',tH.toFixed(1)+'h'],['Horas comp.',dH.toFixed(1)+'h'],['Pendientes',sTotal-sDone]].map(([l,v])=>
           React.createElement('div',{key:l,style:{background:'#f9f9f9',borderRadius:8,padding:'7px 10px',border:'1px solid #eee'}},
@@ -723,6 +930,10 @@ function App(){
         React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
         React.createElement(Lbl,{t:'🔔 Notificarme antes'}),
         React.createElement(Sel,{val:modal.notif||0,onChange:v=>setModal({...modal,notif:parseInt(v)}),opts:[[0,'Sin notificacion'],[5,'5 minutos antes'],[10,'10 minutos antes'],[15,'15 minutos antes'],[30,'30 minutos antes'],[60,'1 hora antes']]}),
+        React.createElement('label',{style:{display:'flex',alignItems:'center',gap:7,fontSize:11,color:'#555',marginTop:10,cursor:'pointer'}},
+          React.createElement('input',{type:'checkbox',checked:!!modal.fixed,onChange:e=>setModal({...modal,fixed:e.target.checked})}),
+          React.createElement('span',null,'🔒 Fijar actividad (no mover con arrastre ni reorganizacion)')
+        ),
         !modal.evtId&&React.createElement(React.Fragment,null,
           React.createElement(Lbl,{t:'Repeticion'}),
           React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
