@@ -26,7 +26,7 @@ const PROJECT_CATS=[
 ];
 const DEFAULT_CATS=PROJECT_CATS;
 const PLANNER_ID='movimiento-real-v1';
-const APP_VERSION='V1.2';
+const APP_VERSION='V1.3';
 const PLAN_START_MIN=8*60+30;
 const PLAN_END_MIN=22*60+30;
 
@@ -277,6 +277,8 @@ function App(){
   const [showCatColors,setShowCatColors]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
   const [plannerMsg,setPlannerMsg]=useState('');
+  const [isMobile,setIsMobile]=useState(()=>window.innerWidth<=700);
+  const [showMobileTools,setShowMobileTools]=useState(false);
   const [goalTargets,setGoalTargets]=useState({...DEFAULT_GOAL_TARGETS});
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
@@ -311,6 +313,12 @@ function App(){
   useEffect(() => {
     setForm(f => ({ ...f, date: dateKey(cursor) }));
   }, [cursor]);
+
+  useEffect(()=>{
+    const onResize=()=>setIsMobile(window.innerWidth<=700);
+    window.addEventListener('resize',onResize);
+    return()=>window.removeEventListener('resize',onResize);
+  },[]);
 
   function scheduleSave(evts,ct,goals=goalTargets){
     if(saveTimer.current) clearTimeout(saveTimer.current);
@@ -873,7 +881,7 @@ function App(){
     React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}}')
   );
 
-  return React.createElement('div',{style:{padding:'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:900,margin:'0 auto'}},
+  return React.createElement('div',{style:{padding:isMobile?'8px':'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:isMobile?'100%':900,margin:'0 auto',overflowX:'hidden'}},
     React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} *{box-sizing:border-box}'),
 
     !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
@@ -913,8 +921,13 @@ function App(){
       )
     ),
 
-    React.createElement('div',{style:{display:'grid',gridTemplateColumns:'160px 1fr',gap:10}},
-      React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:5}},
+    isMobile&&React.createElement('button',{
+      onClick:()=>setShowMobileTools(v=>!v),
+      style:{...btnBase,width:'100%',marginBottom:8,padding:'9px 10px',background:showMobileTools?'#f8fafc':'#fff',border:'1px solid #cbd5e1',fontSize:12,fontWeight:600,color:'#334155'}
+    },showMobileTools?'✕ Ocultar panel, metas y actividades':'☰ Panel, metas y actividades'),
+
+    React.createElement('div',{style:{display:'grid',gridTemplateColumns:isMobile?'1fr':'160px 1fr',gap:10,minWidth:0}},
+      React.createElement('div',{style:{display:(!isMobile||showMobileTools)?'flex':'none',flexDirection:'column',gap:5,minWidth:0}},
         
         React.createElement('div',{style:{background:'#ecfeff',borderRadius:8,padding:10,border:'1px solid #99f6e4',marginBottom:5}},
           React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59',marginBottom:3}},`Proyecto Movimiento Real · ${APP_VERSION}`),
@@ -1002,15 +1015,16 @@ function App(){
         React.createElement('button',{onClick:()=>setShowSum(!showSum),style:{...btnBase,fontSize:11,padding:'7px 10px'}},'Ver resumen ↗')
       ),
 
-      React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflow:'hidden'}},
-        view==='week'&&React.createElement('div',{style:{display:'grid',gridTemplateColumns:`44px repeat(7,1fr)`,borderBottom:'1px solid #e5e5e5'}},
+      React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflowX:view==='week'&&isMobile?'auto':'hidden',overflowY:'hidden',WebkitOverflowScrolling:'touch',minWidth:0}},
+        view==='week'&&isMobile&&React.createElement('div',{style:{position:'sticky',left:0,zIndex:5,padding:'6px 10px',fontSize:10,color:'#64748b',background:'#f8fafc',borderBottom:'1px solid #e5e7eb',width:'100%'}},'← Desliza horizontalmente para ver toda la semana →'),
+        view==='week'&&React.createElement('div',{style:{display:'grid',gridTemplateColumns:`44px repeat(7,1fr)`,borderBottom:'1px solid #e5e5e5',minWidth:isMobile?820:0}},
           React.createElement('div',null),
           ...weekDays.map(d=>{const isT=dateKey(d)===dateKey(td);return React.createElement('div',{key:dateKey(d),style:{padding:'5px 3px',textAlign:'center',fontSize:10,color:isT?'#1D9E75':'#999',borderLeft:'1px solid #e5e5e5'}},
             React.createElement('div',null,DAYS_SH[d.getDay()]),
             React.createElement('div',{style:{fontSize:13,fontWeight:500,background:isT?'#1D9E75':'transparent',color:isT?'#fff':'#1a1a1a',borderRadius:'50%',width:22,height:22,display:'flex',alignItems:'center',justifyContent:'center',margin:'2px auto 0'}},d.getDate())
           );})
         ),
-        React.createElement('div',{style:{display:'grid',gridTemplateColumns:view==='day'?'44px 1fr':`44px repeat(7,1fr)`}},
+        React.createElement('div',{style:{display:'grid',gridTemplateColumns:view==='day'?'44px 1fr':`44px repeat(7,1fr)`,minWidth:view==='week'&&isMobile?820:0}},
           React.createElement('div',{style:{display:'flex',flexDirection:'column'}},
             ...SLOTS.map((s,i)=>React.createElement('div',{key:i,style:{height:SH,display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'1px 4px 0 0',fontSize:9,color:'#bbb',flexShrink:0}},!s.half?fmtH(s.h,false):''))
           ),
