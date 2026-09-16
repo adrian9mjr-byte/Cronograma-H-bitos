@@ -26,6 +26,7 @@ const PROJECT_CATS=[
 ];
 const DEFAULT_CATS=PROJECT_CATS;
 const PLANNER_ID='movimiento-real-v1';
+const APP_VERSION='V1.2';
 const PLAN_START_MIN=8*60+30;
 const PLAN_END_MIN=22*60+30;
 
@@ -76,6 +77,16 @@ const WEEKLY_GOALS=[
   {id:'revision',label:'Revision semanal',defaultTarget:1,match:e=>e.cat==='revision'},
 ];
 const DEFAULT_GOAL_TARGETS=Object.fromEntries(WEEKLY_GOALS.map(g=>[g.id,g.defaultTarget]));
+
+const DEFAULT_MANUAL_MISSIONS=[
+  {id:'certificado_platzi',text:'Conseguir 1 certificado Platzi',done:false},
+  {id:'oferta_usable',text:'Dejar una oferta usable lista para mostrar',done:false},
+  {id:'prospectos_10',text:'Identificar 10 prospectos',done:false},
+  {id:'contactos_5',text:'Realizar 5 contactos reales',done:false},
+  {id:'seguimientos_2',text:'Hacer 2 seguimientos',done:false},
+];
+function freshDefaultMissions(){return DEFAULT_MANUAL_MISSIONS.map(m=>({...m}));}
+function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
 
 function today(){let d=new Date();d.setHours(0,0,0,0);return d;}
 function dateKey(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
@@ -212,16 +223,18 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS}};
-  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS}};
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{}};
+  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{}};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
     if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
+    if(row.key==='weeklyMissions') try{result.weeklyMissions=JSON.parse(row.value)||{};}catch(e){}
   });
   result.events=migrateLegacyEvents(result.events);
   result.cats=mergeProjectCats(result.cats);
   result.goals={...DEFAULT_GOAL_TARGETS,...result.goals};
+  result.weeklyMissions=result.weeklyMissions||{};
   return result;
 }
 
@@ -257,6 +270,11 @@ function App(){
   const [showNCF,setShowNCF]=useState(false);
   const [showSum,setShowSum]=useState(false);
   const [editGoals,setEditGoals]=useState(false);
+  const [editMissions,setEditMissions]=useState(false);
+  const [weeklyMissions,setWeeklyMissions]=useState({});
+  const [newMissionText,setNewMissionText]=useState('');
+  const [celebration,setCelebration]=useState(null);
+  const [showCatColors,setShowCatColors]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
   const [plannerMsg,setPlannerMsg]=useState('');
   const [goalTargets,setGoalTargets]=useState({...DEFAULT_GOAL_TARGETS});
@@ -277,6 +295,7 @@ function App(){
         setEvents(data.events);
         setCats(data.cats);
         setGoalTargets(data.goals||{...DEFAULT_GOAL_TARGETS});
+        setWeeklyMissions(data.weeklyMissions||{});
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
         scheduleEventsNotifications(data.events, data.cats);
       }catch(e){
@@ -314,6 +333,58 @@ function App(){
     setGoalTargets(next);
     scheduleSave(events,cats,next);
   }
+
+  function missionsForWeek(wk){
+    return (Object.prototype.hasOwnProperty.call(weeklyMissions,wk)?weeklyMissions[wk]:freshDefaultMissions()).map(m=>({...m}));
+  }
+  async function persistWeeklyMissions(next){
+    setWeeklyMissions(next);
+    setSync({dot:'#BA7517',msg:'Guardando metas...'});
+    try{
+      await saveToDB('weeklyMissions',next);
+      setSync({dot:'#1D9E75',msg:'Metas guardadas ✓'});
+    }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar metas'});}
+  }
+  function updateMission(wk,id,patch){
+    const list=missionsForWeek(wk).map(m=>m.id===id?{...m,...patch}:m);
+    persistWeeklyMissions({...weeklyMissions,[wk]:list});
+  }
+  function toggleMission(wk,id){
+    const list=missionsForWeek(wk);
+    const current=list.find(m=>m.id===id); if(!current) return;
+    const willDone=!current.done;
+    const next=list.map(m=>m.id===id?{...m,done:willDone}:m);
+    persistWeeklyMissions({...weeklyMissions,[wk]:next});
+    if(willDone){
+      setCelebration(current.text);
+      setTimeout(()=>setCelebration(null),2200);
+    }
+  }
+  function addMission(wk){
+    const text=newMissionText.trim(); if(!text) return;
+    const list=missionsForWeek(wk);
+    const next=[...list,{id:'goal_'+Date.now(),text,done:false}];
+    setNewMissionText('');
+    persistWeeklyMissions({...weeklyMissions,[wk]:next});
+  }
+  function deleteMission(wk,id){
+    const next=missionsForWeek(wk).filter(m=>m.id!==id);
+    persistWeeklyMissions({...weeklyMissions,[wk]:next});
+  }
+
+  function updateCategoryColor(id,hex){
+    const theme=autoTheme(hex);
+    const nextCats=cats.map(c=>c.id===id?{...c,...theme}:c);
+    const nextEvents=cloneEventsMap(events);
+    Object.keys(nextEvents).forEach(dk=>{
+      nextEvents[dk]=nextEvents[dk].map(ev=>{
+        if(ev.cat!==id) return ev;
+        const copy={...ev}; delete copy.customColor; delete copy.customTheme; return copy;
+      });
+    });
+    setCats(nextCats); setEvents(nextEvents); scheduleSave(nextEvents,nextCats,goalTargets);
+  }
+
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
 
   function getPlannerWeekDays(){
@@ -432,6 +503,48 @@ function App(){
     setPlannerMsg(unscheduled.length
       ?`Semana ${start.getDate()}-${end.getDate()}: organizada, pero quedaron ${unscheduled.length} actividad(es) sin espacio.`
       :`Semana ${start.getDate()}-${end.getDate()}: plan listo. Fijas protegidas y flexibles distribuidas.`);
+  }
+
+
+  function reprogramEvent(dk,id){
+    const source=(events[dk]||[]).find(e=>String(e.id)===String(id));
+    if(!source){window.alert('No encontre esta actividad.');return;}
+    if(source.done){window.alert('La actividad ya esta marcada como completada.');return;}
+    if(source.fixed){window.alert('Esta actividad es fija. Desmarca “Fijar actividad” si quieres moverla.');return;}
+
+    const baseDate=new Date(dk+'T12:00:00');
+    const week=getWeekDays(baseDate);
+    const currentWeekKey=weekKeyFromDate(today());
+    if(dateKey(week[0])<currentWeekKey){window.alert('Esta semana ya termino. Mueve la actividad manualmente a la semana actual.');return;}
+
+    const ne=cloneEventsMap(events);
+    ne[dk]=(ne[dk]||[]).filter(e=>String(e.id)!==String(id));
+    if(ne[dk]&&ne[dk].length===0) delete ne[dk];
+    const now=new Date();
+    let found=null;
+    for(const d of week){
+      const targetDk=dateKey(d);
+      const dayStart=new Date(d); dayStart.setHours(0,0,0,0);
+      if(dayStart<today()) continue;
+      let startMin=PLAN_START_MIN;
+      if(targetDk===dateKey(now)){
+        const nowMin=now.getHours()*60+now.getMinutes()+15;
+        startMin=Math.max(startMin,Math.ceil(nowMin/30)*30);
+      }
+      for(let m=startMin;m+(source.dur||1)*30<=PLAN_END_MIN;m+=30){
+        if(!isFreeAt(ne,targetDk,m,source.dur||1)) continue;
+        found={dk:targetDk,m}; break;
+      }
+      if(found) break;
+    }
+    if(!found){window.alert('No encontre un espacio libre suficiente antes de terminar la semana. Puedes arrastrarla manualmente o liberar un bloque.');return;}
+    const slot=minutesToSlot(found.m);
+    const moved={...source,h:slot.h,half:slot.half,rescheduled:true,rescheduleCount:(source.rescheduleCount||0)+1};
+    if(!ne[found.dk]) ne[found.dk]=[];
+    ne[found.dk]=[...ne[found.dk],moved];
+    setEvts(ne);
+    setPlannerMsg(`↪ ${catById(source.cat).name} reprogramada para ${DAYS_ES[new Date(found.dk+'T12:00:00').getDay()]} ${fmtH(slot.h,slot.half)}.`);
+    setView('week'); setCursor(week[0]); setModal(null);
   }
 
   // Función para manejar el archivo subido
@@ -638,6 +751,7 @@ function App(){
     const actions=[
       ['✓',()=>toggleDone(dk,ev.id),ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
       ['✎',openEditor,'rgba(0,0,0,0.1)','Editar'],
+      ...(!compact&&!ev.fixed&&!ev.done?[['↪',()=>reprogramEvent(dk,ev.id),'rgba(0,0,0,0.1)','Reprogramar en espacio libre']]:[]),
       ['✕',()=>delEvt(dk,ev.id),'rgba(0,0,0,0.1)','Eliminar']
     ];
 
@@ -760,7 +874,7 @@ function App(){
   );
 
   return React.createElement('div',{style:{padding:'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:900,margin:'0 auto'}},
-    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} *{box-sizing:border-box}'),
+    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} *{box-sizing:border-box}'),
 
     !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
       React.createElement('span',{style:{flex:1}},'🔔 Activa las notificaciones para recibir alertas antes de tus actividades'),
@@ -803,15 +917,39 @@ function App(){
       React.createElement('div',{style:{display:'flex',flexDirection:'column',gap:5}},
         
         React.createElement('div',{style:{background:'#ecfeff',borderRadius:8,padding:10,border:'1px solid #99f6e4',marginBottom:5}},
-          React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59',marginBottom:3}},'Proyecto Movimiento Real · V1'),
+          React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59',marginBottom:3}},`Proyecto Movimiento Real · ${APP_VERSION}`),
           React.createElement('div',{style:{fontSize:9,color:'#0f766e',lineHeight:1.35,marginBottom:4}},
             (()=>{const w=getPlannerWeekDays();return `Planifica ${w[0].getDate()} ${MON_SH[w[0].getMonth()]} — ${w[6].getDate()} ${MON_SH[w[6].getMonth()]}`;})()
           ),
-          React.createElement('div',{style:{fontSize:9,color:'#134e4a',lineHeight:1.35,marginBottom:7}},'Mision: oferta usable + 10 prospectos + 5 contactos + 2 seguimientos + 1 certificado Platzi.'),
+          React.createElement('div',{style:{fontSize:9,color:'#134e4a',lineHeight:1.35,marginBottom:7}},'Las metas semanales se gestionan en el panel de abajo. Cumplir tarjetas mueve el sistema; cumplir metas confirma el resultado.'),
           React.createElement('button',{onClick:()=>organizePlannerWeek(false),style:{...btnBase,width:'100%',fontSize:11,padding:'7px 6px',background:'#0f766e',color:'#fff',border:'none',marginBottom:5}},'🎲 Organizar semana'),
           React.createElement('button',{onClick:()=>{if(window.confirm('¿Reorganizar las actividades flexibles de esta semana? Las fijas y las ya completadas no se moveran.'))organizePlannerWeek(true);},style:{...btnBase,width:'100%',fontSize:10,padding:'5px 6px',background:'#fff',color:'#0f766e',border:'1px solid #5eead4'}},'↻ Reorganizar flexibles'),
           plannerMsg&&React.createElement('div',{style:{fontSize:9,color:'#115e59',lineHeight:1.35,marginTop:6}},plannerMsg)
         ),
+
+
+        (()=>{
+          const wk=dateKey(getPlannerWeekDays()[0]);
+          const missions=missionsForWeek(wk);
+          const doneCount=missions.filter(m=>m.done).length;
+          return React.createElement('div',{style:{background:'#fff7ed',borderRadius:8,padding:10,border:'1px solid #fed7aa',marginBottom:5}},
+            React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6,marginBottom:6}},
+              React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#9a3412'}},`🏆 Metas semanales · ${doneCount}/${missions.length}`),
+              React.createElement('button',{onClick:()=>setEditMissions(!editMissions),style:{...btnBase,fontSize:9,padding:'2px 6px',border:'1px solid #fdba74',color:'#9a3412',background:'#fff'}},editMissions?'✓ Listo':'✎ Editar')
+            ),
+            ...missions.map(m=>React.createElement('div',{key:m.id,style:{display:'flex',alignItems:'center',gap:5,marginBottom:5}},
+              React.createElement('button',{onClick:()=>toggleMission(wk,m.id),title:m.done?'Marcar como pendiente':'Marcar meta cumplida',style:{width:20,height:20,borderRadius:'50%',border:m.done?'none':'1px solid #fdba74',background:m.done?'#16a34a':'#fff',color:m.done?'#fff':'#9a3412',cursor:'pointer',fontSize:11,flexShrink:0}},m.done?'✓':'○'),
+              editMissions
+                ?React.createElement('input',{value:m.text,onChange:e=>updateMission(wk,m.id,{text:e.target.value}),style:{flex:1,minWidth:0,fontSize:10,padding:'3px 5px',border:'1px solid #fed7aa',borderRadius:5,color:'#7c2d12'}})
+                :React.createElement('div',{style:{flex:1,minWidth:0,fontSize:10,lineHeight:1.25,color:m.done?'#15803d':'#7c2d12',textDecoration:m.done?'line-through':'none'}},m.text),
+              editMissions&&React.createElement('button',{onClick:()=>deleteMission(wk,m.id),title:'Eliminar meta',style:{border:'none',background:'transparent',color:'#c2410c',cursor:'pointer',fontSize:12,padding:2}},'×')
+            )),
+            editMissions&&React.createElement('div',{style:{display:'flex',gap:4,marginTop:6}},
+              React.createElement('input',{value:newMissionText,onChange:e=>setNewMissionText(e.target.value),onKeyDown:e=>{if(e.key==='Enter')addMission(wk);},placeholder:'Nueva meta semanal...',style:{flex:1,minWidth:0,fontSize:10,padding:'4px 6px',border:'1px solid #fed7aa',borderRadius:5}}),
+              React.createElement('button',{onClick:()=>addMission(wk),style:{...btnBase,fontSize:9,padding:'3px 6px',background:'#ea580c',color:'#fff',border:'none'}},'+')
+            )
+          );
+        })(),
 
         // PASO 2: BOTÓN PARA IMPORTAR ICS A LA IZQUIERDA
         React.createElement('div', {style: {background: '#eef2ff', borderRadius: 8, padding: 10, border: '1px solid #c7d2fe', marginBottom: 5}},
@@ -833,6 +971,7 @@ function App(){
           React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
           React.createElement('span',{style:{flex:1}},c.name)
         )),
+        React.createElement('button',{onClick:()=>setShowCatColors(true),style:{...btnBase,fontSize:10,padding:5,border:'1px solid #ddd',color:'#555',background:'#fff'}},'🎨 Colores de categorias'),
         React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,padding:5,border:'1px dashed #ccc',color:'#888'}},'+ Nueva categoria'),
         showNCF&&React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee'}},
           React.createElement(Lbl,{t:'Nombre'}),
@@ -917,6 +1056,14 @@ function App(){
 
     showSum&&React.createElement('div',{style:{marginTop:12,background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:14}},
       React.createElement('div',{style:{fontSize:13,fontWeight:500,marginBottom:10}},'Resumen de progreso'),
+
+      (()=>{
+        const wk=dateKey(weekDays[0]); const ms=missionsForWeek(wk); const md=ms.filter(m=>m.done).length;
+        return React.createElement('div',{style:{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:10,padding:10,marginBottom:10}},
+          React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#9a3412',marginBottom:6}},`🏆 Metas semanales: ${md}/${ms.length} cumplidas`),
+          ...ms.map(m=>React.createElement('div',{key:m.id,style:{fontSize:10,color:m.done?'#15803d':'#7c2d12',marginBottom:3}},`${m.done?'✓':'○'} ${m.text}`))
+        );
+      })(),
       React.createElement('div',{style:{background:'#ecfeff',border:'1px solid #99f6e4',borderRadius:10,padding:10,marginBottom:12}},
         React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:7}},
           React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59'}},'Metas de esta semana'),
@@ -947,6 +1094,20 @@ function App(){
       React.createElement('button',{onClick:()=>setShowSum(false),style:{...btnBase,marginTop:10,fontSize:11,padding:'5px 12px'}},'Cerrar')
     ),
 
+
+    showCatColors&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setShowCatColors(false);},style:overlayStyle},
+      React.createElement('div',{style:{...cardStyle,maxWidth:380}},
+        React.createElement('div',{style:{fontSize:14,fontWeight:600,marginBottom:4}},'🎨 Colores de categorias'),
+        React.createElement('div',{style:{fontSize:10,color:'#777',lineHeight:1.35,marginBottom:12}},'Cambiar un color lo aplica inmediatamente a todas las tarjetas de esa categoria, incluidas las que ya estan en el horario.'),
+        ...cats.map(c=>React.createElement('div',{key:c.id,style:{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:'1px solid #f1f1f1'}},
+          React.createElement('div',{style:{width:18,height:18,borderRadius:'50%',background:c.color,border:'1px solid #ccc',flexShrink:0}}),
+          React.createElement('span',{style:{flex:1,fontSize:11,color:'#333'}},c.name),
+          React.createElement('input',{type:'color',value:c.color,onChange:e=>updateCategoryColor(c.id,e.target.value),style:{width:36,height:28,padding:0,border:'none',background:'none',cursor:'pointer'}})
+        )),
+        React.createElement('button',{onClick:()=>setShowCatColors(false),style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0'}},'Cerrar')
+      )
+    ),
+
     showRepMgr&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setShowRepMgr(false);},style:overlayStyle},
       React.createElement('div',{style:cardStyle},
         React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:4}},'↻ Gestionar repeticiones'),
@@ -965,6 +1126,16 @@ function App(){
              );
           })),
         React.createElement('button',{onClick:()=>setShowRepMgr(false),style:{...btnBase,width:'100%',marginTop:8,fontSize:12,padding:'6px 0'}},'Cerrar')
+      )
+    ),
+
+
+    celebration&&React.createElement('div',{style:{position:'fixed',inset:0,zIndex:12000,pointerEvents:'none',display:'flex',alignItems:'center',justifyContent:'center',background:'rgba(255,255,255,0.20)'}},
+      ...['🎉','✨','⭐','🏆','🎊','💫','🎉','⭐'].map((x,i)=>React.createElement('div',{key:i,style:{position:'absolute',left:`${8+i*12}%`,top:`${5+(i%3)*8}%`,fontSize:18+(i%3)*5,animation:`confettiFall ${1.2+(i%4)*0.2}s ease-in forwards`,animationDelay:`${i*0.06}s`}},x)),
+      React.createElement('div',{style:{animation:'goalPop .45s ease-out',background:'#fff',border:'2px solid #f59e0b',borderRadius:18,padding:'18px 22px',boxShadow:'0 18px 50px rgba(0,0,0,.18)',textAlign:'center',maxWidth:360,margin:16}},
+        React.createElement('div',{style:{fontSize:34,marginBottom:4}},'🏆'),
+        React.createElement('div',{style:{fontSize:18,fontWeight:800,color:'#92400e'}},'¡Meta cumplida!'),
+        React.createElement('div',{style:{fontSize:12,color:'#78350f',marginTop:6,lineHeight:1.35}},celebration)
       )
     ),
 
@@ -996,6 +1167,7 @@ function App(){
           React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
           modal.rep==='custom'&&React.createElement(RepGrid,{days:modal.repDays,toggle:i=>setModal({...modal,repDays:modal.repDays.map((v,j)=>j===i?!v:v)})})
         ),
+        modal.evtId&&!modal.fixed&&React.createElement('button',{onClick:()=>reprogramEvent(modal.dk,modal.evtId),disabled:(events[modal.dk]||[]).find(e=>String(e.id)===String(modal.evtId))?.done,style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0',background:'#fff7ed',color:'#9a3412',border:'1px solid #fdba74'}},'↪ Reprogramar en siguiente espacio libre de esta semana'),
         React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
           React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
