@@ -232,7 +232,7 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) throw error||new Error('No se pudieron cargar los datos');
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
   const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
