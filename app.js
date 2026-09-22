@@ -88,6 +88,15 @@ const DEFAULT_MANUAL_MISSIONS=[
 function freshDefaultMissions(){return DEFAULT_MANUAL_MISSIONS.map(m=>({...m}));}
 function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
 
+function weeklyGoalStats(events,days,targets){
+  const weekEvents=days.flatMap(d=>events[dateKey(d)]||[]);
+  return WEEKLY_GOALS.map(g=>{
+    const matched=weekEvents.filter(g.match);
+    const target=targets&&Number.isFinite(targets[g.id])?targets[g.id]:null;
+    return {...g,target,planned:matched.length,done:matched.filter(e=>e.done).length};
+  });
+}
+
 function today(){let d=new Date();d.setHours(0,0,0,0);return d;}
 function dateKey(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
 function addDays(d,n){let r=new Date(d);r.setDate(r.getDate()+n);return r;}
@@ -223,13 +232,14 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{}};
-  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{}};
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
+  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
     if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
     if(row.key==='weeklyMissions') try{result.weeklyMissions=JSON.parse(row.value)||{};}catch(e){}
+    if(row.key==='weeklyGoalTargets') try{result.weeklyGoalTargets=JSON.parse(row.value)||{};}catch(e){}
   });
   result.events=migrateLegacyEvents(result.events);
   result.cats=mergeProjectCats(result.cats);
@@ -280,6 +290,11 @@ function App(){
   const [isMobile,setIsMobile]=useState(()=>window.innerWidth<=700);
   const [showMobileTools,setShowMobileTools]=useState(false);
   const [goalTargets,setGoalTargets]=useState({...DEFAULT_GOAL_TARGETS});
+  const [weeklyGoalTargets,setWeeklyGoalTargets]=useState({});
+  const [goalsCursor,setGoalsCursor]=useState(today());
+  const [currentGoalWeek,setCurrentGoalWeek]=useState(()=>weekKeyFromDate(today()));
+  const [goalsReady,setGoalsReady]=useState(false);
+  const snapshotQueue=useRef(Promise.resolve());
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
@@ -298,6 +313,8 @@ function App(){
         setCats(data.cats);
         setGoalTargets(data.goals||{...DEFAULT_GOAL_TARGETS});
         setWeeklyMissions(data.weeklyMissions||{});
+        setWeeklyGoalTargets(data.weeklyGoalTargets||{});
+        setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
         scheduleEventsNotifications(data.events, data.cats);
       }catch(e){
@@ -309,6 +326,34 @@ function App(){
       }
     })();
   },[]);
+
+  // Detectar el cambio de semana incluso si la app permanece abierta.
+  useEffect(()=>{
+    const timer=setInterval(()=>setCurrentGoalWeek(weekKeyFromDate(today())),60000);
+    return()=>clearInterval(timer);
+  },[]);
+
+  useEffect(()=>{
+    if(!goalsReady) return;
+    // Solo se captura la semana actual: nunca reconstruir objetivos históricos.
+    if(Object.prototype.hasOwnProperty.call(weeklyGoalTargets,currentGoalWeek)) return;
+    persistGoalSnapshots({...weeklyGoalTargets,[currentGoalWeek]:{...goalTargets}});
+  },[goalsReady,currentGoalWeek]);
+
+  function persistGoalSnapshots(next){
+    setWeeklyGoalTargets(next);
+    // Serializar escrituras para que una edición rápida no restaure un snapshot viejo.
+    snapshotQueue.current=snapshotQueue.current.catch(()=>{}).then(()=>saveToDB('weeklyGoalTargets',next));
+    snapshotQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar historial de objetivos'}));
+  }
+
+  function selectGoalsWeek(date){
+    setGoalsCursor(date);
+    setCurrentGoalWeek(weekKeyFromDate(today()));
+    setEditGoals(false);
+    setEditMissions(false);
+    setNewMissionText('');
+  }
 
   useEffect(() => {
     setForm(f => ({ ...f, date: dateKey(cursor) }));
@@ -336,14 +381,16 @@ function App(){
   function setEvts(e){setEvents(e);scheduleSave(e,cats,goalTargets);}
   function setCatsS(c){setCats(c);scheduleSave(events,c,goalTargets);}
   function setGoalTarget(id,value){
+    if(!goalsReady||weekKeyFromDate(goalsCursor)!==weekKeyFromDate(today())) return;
     const n=Math.max(0,Math.min(21,parseInt(value,10)||0));
     const next={...goalTargets,[id]:n};
     setGoalTargets(next);
+    persistGoalSnapshots({...weeklyGoalTargets,[weekKeyFromDate(today())]:{...next}});
     scheduleSave(events,cats,next);
   }
 
   function missionsForWeek(wk){
-    return (Object.prototype.hasOwnProperty.call(weeklyMissions,wk)?weeklyMissions[wk]:freshDefaultMissions()).map(m=>({...m}));
+    return (Object.prototype.hasOwnProperty.call(weeklyMissions,wk)?weeklyMissions[wk]:(wk===weekKeyFromDate(today())?freshDefaultMissions():[])).map(m=>({...m}));
   }
   async function persistWeeklyMissions(next){
     setWeeklyMissions(next);
@@ -354,10 +401,12 @@ function App(){
     }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar metas'});}
   }
   function updateMission(wk,id,patch){
+    if(!goalsReady||wk!==weekKeyFromDate(today())) return;
     const list=missionsForWeek(wk).map(m=>m.id===id?{...m,...patch}:m);
     persistWeeklyMissions({...weeklyMissions,[wk]:list});
   }
   function toggleMission(wk,id){
+    if(!goalsReady||wk!==weekKeyFromDate(today())) return;
     const list=missionsForWeek(wk);
     const current=list.find(m=>m.id===id); if(!current) return;
     const willDone=!current.done;
@@ -369,6 +418,7 @@ function App(){
     }
   }
   function addMission(wk){
+    if(!goalsReady||wk!==weekKeyFromDate(today())) return;
     const text=newMissionText.trim(); if(!text) return;
     const list=missionsForWeek(wk);
     const next=[...list,{id:'goal_'+Date.now(),text,done:false}];
@@ -376,6 +426,7 @@ function App(){
     persistWeeklyMissions({...weeklyMissions,[wk]:next});
   }
   function deleteMission(wk,id){
+    if(!goalsReady||wk!==weekKeyFromDate(today())) return;
     const next=missionsForWeek(wk).filter(m=>m.id!==id);
     persistWeeklyMissions({...weeklyMissions,[wk]:next});
   }
@@ -727,14 +778,23 @@ function App(){
   const tH=all.reduce((s,e)=>s+e.dur*0.5,0),dH=all.filter(e=>e.done).reduce((s,e)=>s+e.dur*0.5,0);
   const catStats=cats.map(c=>{const ce=all.filter(e=>e.cat===c.id);return{...c,count:ce.length,done:ce.filter(e=>e.done).length,hrs:ce.reduce((s,e)=>s+e.dur*0.5,0)};}).filter(c=>c.count>0).sort((a,b)=>b.hrs-a.hrs);
   const repIds=getAllRepIds();
-  const weekKeys=weekDays.map(dateKey);
-  const weekAll=[];
-  weekKeys.forEach(dk=>(events[dk]||[]).forEach(e=>weekAll.push({...e,dk})));
-  const weekGoalStats=WEEKLY_GOALS.map(g=>{
-    const matched=weekAll.filter(g.match);
-    const target=goalTargets[g.id]!==undefined?goalTargets[g.id]:g.defaultTarget;
-    return {...g,target,planned:matched.length,done:matched.filter(e=>e.done).length};
-  });
+  const goalWeekDays=getWeekDays(goalsCursor),goalWeekKey=dateKey(goalWeekDays[0]);
+  const isCurrentGoalWeek=goalWeekKey===currentGoalWeek;
+  const canEditGoals=goalsReady&&isCurrentGoalWeek;
+  const selectedTargets=isCurrentGoalWeek?goalTargets:weeklyGoalTargets[goalWeekKey];
+  const weekGoalStats=weeklyGoalStats(events,goalWeekDays,selectedTargets);
+
+  function goalWeekNavigation(){
+    const format=d=>d.toLocaleDateString('es',{day:'numeric',month:'short',year:'numeric'});
+    return React.createElement('div',{style:{marginBottom:8}},
+      React.createElement('div',{'aria-live':'polite',style:{fontSize:10,lineHeight:1.4,overflowWrap:'anywhere',marginBottom:5}},`${format(goalWeekDays[0])} — ${format(goalWeekDays[6])}`),
+      React.createElement('div',{style:{display:'flex',gap:6,flexWrap:'wrap'}},
+        React.createElement('button',{'aria-label':'Semana anterior',onClick:()=>selectGoalsWeek(addDays(goalsCursor,-7)),style:btnBase},'←'),
+        React.createElement('button',{'aria-label':'Semana siguiente',onClick:()=>selectGoalsWeek(addDays(goalsCursor,7)),style:btnBase},'→'),
+        React.createElement('button',{onClick:()=>selectGoalsWeek(today()),disabled:isCurrentGoalWeek,style:{...btnBase,fontSize:10,padding:'6px',maxWidth:'100%'}},'Volver a esta semana')
+      )
+    );
+  }
 
   function EvBlock({ev,dk}){
     const baseCat=catById(ev.cat);
@@ -942,22 +1002,24 @@ function App(){
 
 
         (()=>{
-          const wk=dateKey(getPlannerWeekDays()[0]);
+          const wk=goalWeekKey;
           const missions=missionsForWeek(wk);
           const doneCount=missions.filter(m=>m.done).length;
           return React.createElement('div',{style:{background:'#fff7ed',borderRadius:8,padding:10,border:'1px solid #fed7aa',marginBottom:5}},
-            React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:6,marginBottom:6}},
+            React.createElement('div',{style:{display:'flex',flexWrap:'wrap',alignItems:'center',justifyContent:'space-between',gap:6,marginBottom:6}},
               React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#9a3412'}},`🏆 Metas semanales · ${doneCount}/${missions.length}`),
-              React.createElement('button',{onClick:()=>setEditMissions(!editMissions),style:{...btnBase,fontSize:9,padding:'2px 6px',border:'1px solid #fdba74',color:'#9a3412',background:'#fff'}},editMissions?'✓ Listo':'✎ Editar')
+              canEditGoals&&React.createElement('button',{onClick:()=>setEditMissions(!editMissions),style:{...btnBase,fontSize:9,padding:'2px 6px',border:'1px solid #fdba74',color:'#9a3412',background:'#fff'}},editMissions?'✓ Listo':'✎ Editar')
             ),
+            goalWeekNavigation(),
+            !missions.length&&React.createElement('div',{style:{fontSize:10,color:'#7c2d12',lineHeight:1.4}},'Sin metas registradas para esta semana'),
             ...missions.map(m=>React.createElement('div',{key:m.id,style:{display:'flex',alignItems:'center',gap:5,marginBottom:5}},
-              React.createElement('button',{onClick:()=>toggleMission(wk,m.id),title:m.done?'Marcar como pendiente':'Marcar meta cumplida',style:{width:20,height:20,borderRadius:'50%',border:m.done?'none':'1px solid #fdba74',background:m.done?'#16a34a':'#fff',color:m.done?'#fff':'#9a3412',cursor:'pointer',fontSize:11,flexShrink:0}},m.done?'✓':'○'),
-              editMissions
+              React.createElement('button',{disabled:!canEditGoals,onClick:()=>toggleMission(wk,m.id),'aria-label':`${m.text}: ${m.done?'Cumplida':'No cumplida'}`,title:canEditGoals?(m.done?'Marcar como pendiente':'Marcar meta cumplida'):(m.done?'Cumplida':'No cumplida'),style:{width:20,height:20,borderRadius:'50%',border:m.done?'none':'1px solid #fdba74',background:m.done?'#16a34a':'#fff',color:m.done?'#fff':'#9a3412',cursor:canEditGoals?'pointer':'default',fontSize:11,flexShrink:0}},m.done?'✓':'○'),
+              canEditGoals&&editMissions
                 ?React.createElement('input',{value:m.text,onChange:e=>updateMission(wk,m.id,{text:e.target.value}),style:{flex:1,minWidth:0,fontSize:10,padding:'3px 5px',border:'1px solid #fed7aa',borderRadius:5,color:'#7c2d12'}})
-                :React.createElement('div',{style:{flex:1,minWidth:0,fontSize:10,lineHeight:1.25,color:m.done?'#15803d':'#7c2d12',textDecoration:m.done?'line-through':'none'}},m.text),
-              editMissions&&React.createElement('button',{onClick:()=>deleteMission(wk,m.id),title:'Eliminar meta',style:{border:'none',background:'transparent',color:'#c2410c',cursor:'pointer',fontSize:12,padding:2}},'×')
+                :React.createElement('div',{style:{flex:1,minWidth:0,overflowWrap:'anywhere',fontSize:10,lineHeight:1.25,color:m.done?'#15803d':'#7c2d12',textDecoration:m.done?'line-through':'none'}},m.text,!isCurrentGoalWeek&&React.createElement('span',{style:{display:'block',fontSize:9}},m.done?'Cumplida':'No cumplida')),
+              canEditGoals&&editMissions&&React.createElement('button',{onClick:()=>deleteMission(wk,m.id),title:'Eliminar meta',style:{border:'none',background:'transparent',color:'#c2410c',cursor:'pointer',fontSize:12,padding:2}},'×')
             )),
-            editMissions&&React.createElement('div',{style:{display:'flex',gap:4,marginTop:6}},
+            canEditGoals&&editMissions&&React.createElement('div',{style:{display:'flex',gap:4,marginTop:6}},
               React.createElement('input',{value:newMissionText,onChange:e=>setNewMissionText(e.target.value),onKeyDown:e=>{if(e.key==='Enter')addMission(wk);},placeholder:'Nueva meta semanal...',style:{flex:1,minWidth:0,fontSize:10,padding:'4px 6px',border:'1px solid #fed7aa',borderRadius:5}}),
               React.createElement('button',{onClick:()=>addMission(wk),style:{...btnBase,fontSize:9,padding:'3px 6px',background:'#ea580c',color:'#fff',border:'none'}},'+')
             )
@@ -1072,22 +1134,26 @@ function App(){
       React.createElement('div',{style:{fontSize:13,fontWeight:500,marginBottom:10}},'Resumen de progreso'),
 
       (()=>{
-        const wk=dateKey(weekDays[0]); const ms=missionsForWeek(wk); const md=ms.filter(m=>m.done).length;
+        const wk=goalWeekKey; const ms=missionsForWeek(wk); const md=ms.filter(m=>m.done).length;
         return React.createElement('div',{style:{background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:10,padding:10,marginBottom:10}},
           React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#9a3412',marginBottom:6}},`🏆 Metas semanales: ${md}/${ms.length} cumplidas`),
-          ...ms.map(m=>React.createElement('div',{key:m.id,style:{fontSize:10,color:m.done?'#15803d':'#7c2d12',marginBottom:3}},`${m.done?'✓':'○'} ${m.text}`))
+          goalWeekNavigation(),
+          !ms.length&&React.createElement('div',{style:{fontSize:10,color:'#7c2d12'}},'Sin metas registradas para esta semana'),
+          ...ms.map(m=>React.createElement('div',{key:m.id,style:{fontSize:10,overflowWrap:'anywhere',color:m.done?'#15803d':'#7c2d12',marginBottom:3}},`${m.done?'✓ Cumplida':'○ No cumplida'} · ${m.text}`))
         );
       })(),
       React.createElement('div',{style:{background:'#ecfeff',border:'1px solid #99f6e4',borderRadius:10,padding:10,marginBottom:12}},
-        React.createElement('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:7}},
+        React.createElement('div',{style:{display:'flex',flexWrap:'wrap',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:7}},
           React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#115e59'}},'Metas de esta semana'),
-          React.createElement('button',{onClick:()=>setEditGoals(!editGoals),style:{...btnBase,fontSize:9,padding:'3px 7px',border:'1px solid #5eead4',color:'#0f766e',background:'#fff'}},editGoals?'✓ Listo':'✎ Editar objetivos')
+          canEditGoals&&React.createElement('button',{onClick:()=>setEditGoals(!editGoals),style:{...btnBase,fontSize:9,padding:'3px 7px',border:'1px solid #5eead4',color:'#0f766e',background:'#fff'}},editGoals?'✓ Listo':'✎ Editar objetivos')
         ),
-        editGoals&&React.createElement('div',{style:{fontSize:9,color:'#0f766e',lineHeight:1.35,marginBottom:7}},'Cambia el minimo semanal. Se guarda automaticamente y el nuevo numero se usa la proxima vez que pulses Organizar/Reorganizar cuando aplica.'),
-        ...weekGoalStats.map(g=>React.createElement('div',{key:g.id,style:{display:'grid',gridTemplateColumns:editGoals?'1fr 54px auto':'1fr auto',gap:8,alignItems:'center',fontSize:10,marginBottom:5}},
-          React.createElement('span',{style:{color:'#134e4a'}},g.label),
-          editGoals&&React.createElement('input',{type:'number',min:0,max:21,value:g.target,onChange:e=>setGoalTarget(g.id,e.target.value),style:{width:52,fontSize:10,padding:'2px 4px',border:'1px solid #99f6e4',borderRadius:5,background:'#fff',color:'#134e4a'}}),
-          React.createElement('span',{style:{fontWeight:700,color:g.done>=g.target?'#166534':'#0f766e',whiteSpace:'nowrap'}},`${g.done}/${g.target} hechas · ${g.planned} plan.`)
+        goalWeekNavigation(),
+        !selectedTargets&&React.createElement('div',{style:{fontSize:10,color:'#0f766e',marginBottom:7}},'Sin objetivos numéricos registrados para esta semana. Se muestran solo las actividades.'),
+        canEditGoals&&editGoals&&React.createElement('div',{style:{fontSize:9,color:'#0f766e',lineHeight:1.35,marginBottom:7}},'Cambia el minimo semanal. Se guarda automaticamente y el nuevo numero se usa la proxima vez que pulses Organizar/Reorganizar cuando aplica.'),
+        ...weekGoalStats.map(g=>React.createElement('div',{key:g.id,style:{display:'grid',gridTemplateColumns:canEditGoals&&editGoals?'minmax(0,1fr) 54px minmax(0,1fr)':'minmax(0,1fr) minmax(0,1fr)',gap:8,alignItems:'center',fontSize:10,marginBottom:5}},
+          React.createElement('span',{style:{color:'#134e4a',overflowWrap:'anywhere'}},g.label),
+          canEditGoals&&editGoals&&React.createElement('input',{'aria-label':`Objetivo semanal de ${g.label}`,type:'number',min:0,max:21,value:g.target,onChange:e=>setGoalTarget(g.id,e.target.value),style:{width:52,fontSize:10,padding:'2px 4px',border:'1px solid #99f6e4',borderRadius:5,background:'#fff',color:'#134e4a'}}),
+          React.createElement('span',{style:{fontWeight:700,color:g.target!==null&&g.done>=g.target?'#166534':'#0f766e',textAlign:'right'}},g.target===null?`${g.done} hechas · ${g.planned} plan. · Sin objetivo registrado`:`${g.done}/${g.target} hechas · ${g.planned} plan.`)
         ))
       ),
       React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:10}},
