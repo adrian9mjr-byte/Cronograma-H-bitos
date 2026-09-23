@@ -24,7 +24,7 @@ const PROJECT_CATS=[
   {id:'vida',name:'Vida personal',color:'#D4537E',bg:'#FBEAF0',text:'#4B1528'},
   {id:'revision',name:'Revision semanal',color:'#475569',bg:'#E2E8F0',text:'#1E293B'},
 ];
-const DEFAULT_CATS=PROJECT_CATS;
+const DEFAULT_CATS=PROJECT_CATS.map(c=>({...c,completionAnimationEnabled:true}));
 const PLANNER_ID='movimiento-real-v1';
 const APP_VERSION='V1.3';
 const PLAN_START_MIN=8*60+30;
@@ -33,8 +33,8 @@ const PLAN_END_MIN=22*60+30;
 function mergeProjectCats(saved=[]){
   const byId=new Map((saved||[]).map(c=>[c.id,c]));
   const ids=new Set(PROJECT_CATS.map(c=>c.id));
-  const merged=PROJECT_CATS.map(c=>({...c,...(byId.get(c.id)||{}),name:c.name}));
-  const extras=(saved||[]).filter(c=>!ids.has(c.id)&&c.id!=='notas');
+  const merged=DEFAULT_CATS.map(c=>({...c,...(byId.get(c.id)||{}),name:c.name}));
+  const extras=(saved||[]).filter(c=>!ids.has(c.id)&&c.id!=='notas').map(c=>({completionAnimationEnabled:true,...c}));
   return [...merged,...extras];
 }
 
@@ -87,6 +87,19 @@ const DEFAULT_MANUAL_MISSIONS=[
 ];
 function freshDefaultMissions(){return DEFAULT_MANUAL_MISSIONS.map(m=>({...m}));}
 function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
+
+function completedDaysForWeek(events,date){
+  return getWeekDays(date).map(dateKey).filter(dk=>{
+    const dayEvents=events[dk]||[];
+    return dayEvents.length>0&&dayEvents.every(e=>e.done);
+  });
+}
+
+function starsByWeek(events,existing={}){
+  const keys=new Set(Object.keys(existing||{}));
+  Object.keys(events||{}).forEach(dk=>keys.add(weekKeyFromDate(new Date(dk+'T12:00:00'))));
+  return Object.fromEntries([...keys].map(wk=>[wk,completedDaysForWeek(events,new Date(wk+'T12:00:00'))]));
+}
 
 function weeklyGoalStats(events,days,targets){
   const weekEvents=days.flatMap(d=>events[dateKey(d)]||[]);
@@ -232,14 +245,15 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
-  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{}};
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{}};
+  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{}};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
     if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
     if(row.key==='weeklyMissions') try{result.weeklyMissions=JSON.parse(row.value)||{};}catch(e){}
     if(row.key==='weeklyGoalTargets') try{result.weeklyGoalTargets=JSON.parse(row.value)||{};}catch(e){}
+    if(row.key==='weeklyStars') try{result.weeklyStars=JSON.parse(row.value)||{};}catch(e){}
   });
   result.events=migrateLegacyEvents(result.events);
   result.cats=mergeProjectCats(result.cats);
@@ -294,6 +308,9 @@ function App(){
   const [goalsCursor,setGoalsCursor]=useState(today());
   const [currentGoalWeek,setCurrentGoalWeek]=useState(()=>weekKeyFromDate(today()));
   const [goalsReady,setGoalsReady]=useState(false);
+  const [weeklyStars,setWeeklyStars]=useState({});
+  const [completionFx,setCompletionFx]=useState(null);
+  const [starFx,setStarFx]=useState(null);
   const snapshotQueue=useRef(Promise.resolve());
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
@@ -314,6 +331,7 @@ function App(){
         setGoalTargets(data.goals||{...DEFAULT_GOAL_TARGETS});
         setWeeklyMissions(data.weeklyMissions||{});
         setWeeklyGoalTargets(data.weeklyGoalTargets||{});
+        setWeeklyStars(data.weeklyStars||{});
         setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
         scheduleEventsNotifications(data.events, data.cats);
@@ -378,7 +396,11 @@ function App(){
     },800);
   }
 
-  function setEvts(e){setEvents(e);scheduleSave(e,cats,goalTargets);}
+  function setEvts(e){
+    setEvents(e);
+    scheduleSave(e,cats,goalTargets);
+    persistWeeklyStars(starsByWeek(e,weeklyStars));
+  }
   function setCatsS(c){setCats(c);scheduleSave(events,c,goalTargets);}
   function setGoalTarget(id,value){
     if(!goalsReady||weekKeyFromDate(goalsCursor)!==weekKeyFromDate(today())) return;
@@ -387,6 +409,12 @@ function App(){
     setGoalTargets(next);
     persistGoalSnapshots({...weeklyGoalTargets,[weekKeyFromDate(today())]:{...next}});
     scheduleSave(events,cats,next);
+  }
+
+  async function persistWeeklyStars(next){
+    setWeeklyStars(next);
+    try{await saveToDB('weeklyStars',next);}
+    catch(e){setSync({dot:'#D85A30',msg:'Error al guardar estrellas'});}
   }
 
   function missionsForWeek(wk){
@@ -442,6 +470,11 @@ function App(){
       });
     });
     setCats(nextCats); setEvents(nextEvents); scheduleSave(nextEvents,nextCats,goalTargets);
+  }
+
+  function updateCategoryCompletionAnimation(id,enabled){
+    const next=cats.map(c=>c.id===id?{...c,completionAnimationEnabled:enabled}:c);
+    setCatsS(next);
   }
 
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
@@ -674,7 +707,7 @@ function App(){
     setShowRepMgr(false);
   }
 
-  function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif,fixed=false){
+  function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif,fixed=false,completionAnimationOverride=null){
     const rd=getRepDays(repType,cd);
     if(!rd.length) return base;
     const out={...base};
@@ -685,7 +718,7 @@ function App(){
       if(rd.includes(d.getDay())){
         const dk=dateKey(d);
         if(!out[dk]) out[dk]=[];
-        out[dk]=[...out[dk],{id:Date.now()+'_'+Math.random(),cat,note,h,half,dur,done:false,repId,notif:notif||0,fixed:!!fixed}];
+        out[dk]=[...out[dk],{id:Date.now()+'_'+Math.random(),cat,note,h,half,dur,done:false,repId,notif:notif||0,fixed:!!fixed,completionAnimationOverride}];
       }
       d=addDays(d,1);
     }
@@ -715,20 +748,44 @@ function App(){
     const co=catById(modal.cat),uc=modal.color!==co.color,theme=uc?autoTheme(modal.color):null;
     let ne={...events};
     if(modal.evtId){
-      ne[modal.dk]=(ne[modal.dk]||[]).map(e=>String(e.id)===modal.evtId?{...e,cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed}:e);
+      ne[modal.dk]=(ne[modal.dk]||[]).map(e=>String(e.id)===modal.evtId?{...e,cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed,completionAnimationOverride:modal.completionAnimationOverride}:e);
     } else {
       if(modal.rep==='none'){
         if(!ne[modal.dk]) ne[modal.dk]=[];
-        ne[modal.dk]=[...ne[modal.dk],{id:Date.now(),cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,done:false,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed}];
+        ne[modal.dk]=[...ne[modal.dk],{id:Date.now(),cat:modal.cat,note:modal.note,h:modal.h,half:modal.half,dur:modal.dur,done:false,customColor:uc?modal.color:null,customTheme:theme,notif:modal.notif||0,fixed:!!modal.fixed,completionAnimationOverride:modal.completionAnimationOverride}];
       } else {
-        ne=addRepEvts(ne,modal.cat,modal.note,modal.h,modal.half,modal.dur,modal.rep,modal.repDays,cursor,modal.notif||0,!!modal.fixed);
+        ne=addRepEvts(ne,modal.cat,modal.note,modal.h,modal.half,modal.dur,modal.rep,modal.repDays,cursor,modal.notif||0,!!modal.fixed,modal.completionAnimationOverride??null);
       }
     }
     setModal(null);setEvts(ne);
   }
 
   function delEvt(dk,id){setEvts({...events,[dk]:(events[dk]||[]).filter(e=>String(e.id)!==String(id))});}
-  function toggleDone(dk,id){setEvts({...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:!e.done}:e)});}
+  function toggleDone(dk,id){
+    const current=(events[dk]||[]).find(e=>String(e.id)===String(id));
+    if(!current) return;
+    const wasDayComplete=(events[dk]||[]).length>0&&(events[dk]||[]).every(e=>e.done);
+    const willDone=!current.done;
+    const nextEvents={...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:willDone}:e)};
+    const isDayComplete=(nextEvents[dk]||[]).length>0&&(nextEvents[dk]||[]).every(e=>e.done);
+    setEvts(nextEvents);
+    if(willDone){
+      const category=catById(current.cat);
+      const enabled=current.completionAnimationOverride===null||current.completionAnimationOverride===undefined
+        ?category.completionAnimationEnabled!==false
+        :current.completionAnimationOverride;
+      if(enabled){
+        const token=Date.now();
+        setCompletionFx({key:`${dk}:${id}`,token});
+        setTimeout(()=>setCompletionFx(f=>f&&f.token===token?null:f),1100);
+      }
+      if(!wasDayComplete&&isDayComplete){
+        const token=Date.now();
+        setStarFx({dk,token});
+        setTimeout(()=>setStarFx(f=>f&&f.token===token?null:f),1500);
+      }
+    }
+  }
 
   function deleteCat(id){
     if(PROJECT_CATS.some(c=>c.id===id)){
@@ -740,7 +797,7 @@ function App(){
 
   function createCat(){
     if(!ncName.trim()) return;
-    setCatsS([...cats,{id:'cat_'+Date.now(),name:ncName,...autoTheme(ncColor)}]);
+    setCatsS([...cats,{id:'cat_'+Date.now(),name:ncName,...autoTheme(ncColor),completionAnimationEnabled:true}]);
     setNcName('');setNcColor('#7F77DD');setShowNCF(false);
   }
 
@@ -783,6 +840,9 @@ function App(){
   const canEditGoals=goalsReady&&isCurrentGoalWeek;
   const selectedTargets=isCurrentGoalWeek?goalTargets:weeklyGoalTargets[goalWeekKey];
   const weekGoalStats=weeklyGoalStats(events,goalWeekDays,selectedTargets);
+  const starWeekDays=getWeekDays(td);
+  const completedStarDays=completedDaysForWeek(events,td);
+  const completedStarSet=new Set(completedStarDays);
 
   function goalWeekNavigation(){
     const format=d=>d.toLocaleDateString('es',{day:'numeric',month:'short',year:'numeric'});
@@ -815,7 +875,7 @@ function App(){
     const widthPct = 100 / maxCols;
     const leftPct = col * widthPct;
     const fullLabel=baseCat.name+(ev.note?` · ${ev.note}`:'')+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'');
-    const openEditor=()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed});
+    const openEditor=()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null});
     const actions=[
       ['✓',()=>toggleDone(dk,ev.id),ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
       ['✎',openEditor,'rgba(0,0,0,0.1)','Editar'],
@@ -835,7 +895,10 @@ function App(){
         width: `calc(${widthPct}% - 4px)`,
         top, height, borderRadius:5, padding:compact?'3px 48px 3px 4px':'3px 5px', cursor:ev.fixed?'default':'grab', zIndex:2, overflow:'hidden', display:'flex',
         flexDirection:'column', justifyContent:compact?'center':'space-between', background:th.bg, color:th.text,
-        borderLeft:`3px solid ${th.color}`, opacity:ev.done?0.5:1, boxShadow:'0 1px 3px rgba(0,0,0,0.15)', pointerEvents: dragEvt ? 'none' : 'auto'
+        borderLeft:`3px solid ${th.color}`, opacity:ev.done?0.5:1,
+        boxShadow:completionFx?.key===`${dk}:${ev.id}`?'0 0 0 2px #facc15, 0 0 18px #22c55e':'0 1px 3px rgba(0,0,0,0.15)',
+        animation:completionFx?.key===`${dk}:${ev.id}`?'missionComplete .7s ease-out':'none',
+        pointerEvents: dragEvt ? 'none' : 'auto'
       }
     },
       React.createElement('div',{style:{fontSize:compact?9:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.2,color:th.text}},
@@ -942,7 +1005,7 @@ function App(){
   );
 
   return React.createElement('div',{style:{padding:isMobile?'8px':'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:isMobile?'100%':900,margin:'0 auto',overflowX:'hidden'}},
-    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} *{box-sizing:border-box}'),
+    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}25%,75%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:calc(100% - 92px);top:70px;transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
 
     !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
       React.createElement('span',{style:{flex:1}},'🔔 Activa las notificaciones para recibir alertas antes de tus actividades'),
@@ -960,9 +1023,13 @@ function App(){
         React.createElement('div',{style:{fontSize:18,fontWeight:500}},`${DAYS_ES[td.getDay()]}, ${td.getDate()} de ${MON_ES[td.getMonth()]} ${td.getFullYear()}`),
         React.createElement('div',{style:{fontSize:11,color:'#888',marginTop:2}},`Hoy tienes ${(events[dateKey(td)]||[]).length} actividad(es)`)
       ),
-      React.createElement('div',{style:{display:'flex',gap:6,alignItems:'center'}},
+      React.createElement('div',{style:{display:'flex',gap:isMobile?5:10,alignItems:'center',flexWrap:'wrap',justifyContent:'flex-end'}},
+        React.createElement('div',{'aria-label':`${completedStarDays.length} de 7 días completos`,style:{display:'flex',alignItems:'center',gap:5,padding:'4px 7px',border:'1px solid #fde68a',background:'#fffbeb',borderRadius:9,whiteSpace:'nowrap'}},
+          React.createElement('span',{style:{fontSize:11,fontWeight:800,color:'#92400e'}},`${completedStarDays.length}/7`),
+          React.createElement('span',{style:{display:'flex',gap:1}},...starWeekDays.map(d=>React.createElement('span',{key:dateKey(d),title:`${DAYS_ES[d.getDay()]} ${d.getDate()}`,style:{fontSize:isMobile?13:15,color:completedStarSet.has(dateKey(d))?'#f59e0b':'#d1d5db',filter:completedStarSet.has(dateKey(d))?'drop-shadow(0 1px 2px rgba(245,158,11,.45))':'none'}},completedStarSet.has(dateKey(d))?'★':'☆')))
+        ),
         React.createElement('div',{style:{width:65,background:'#eee',borderRadius:99,height:5,overflow:'hidden'}},
-          React.createElement('div',{style:{height:'100%',width:`${pct}%`,background:'#1D9E75',borderRadius:99}})
+          React.createElement('div',{style:{height:'100%',width:`${pct}%`,background:'#1D9E75',borderRadius:99,transition:'width .5s cubic-bezier(.22,1,.36,1)',boxShadow:pct?'0 0 8px rgba(29,158,117,.35)':'none'}})
         ),
         React.createElement('span',{style:{fontSize:11,color:'#888'}},`${pct}% listo`)
       )
@@ -1046,7 +1113,7 @@ function App(){
           React.createElement('div',{style:{width:8,height:8,borderRadius:'50%',background:c.color,flexShrink:0}}),
           React.createElement('span',{style:{flex:1}},c.name)
         )),
-        React.createElement('button',{onClick:()=>setShowCatColors(true),style:{...btnBase,fontSize:10,padding:5,border:'1px solid #ddd',color:'#555',background:'#fff'}},'🎨 Colores de categorias'),
+        React.createElement('button',{onClick:()=>setShowCatColors(true),style:{...btnBase,fontSize:10,padding:5,border:'1px solid #ddd',color:'#555',background:'#fff'}},'🎨 Categorias y animaciones'),
         React.createElement('button',{onClick:()=>setShowNCF(!showNCF),style:{...btnBase,fontSize:11,padding:5,border:'1px dashed #ccc',color:'#888'}},'+ Nueva categoria'),
         showNCF&&React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee'}},
           React.createElement(Lbl,{t:'Nombre'}),
@@ -1177,11 +1244,15 @@ function App(){
 
     showCatColors&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setShowCatColors(false);},style:overlayStyle},
       React.createElement('div',{style:{...cardStyle,maxWidth:380}},
-        React.createElement('div',{style:{fontSize:14,fontWeight:600,marginBottom:4}},'🎨 Colores de categorias'),
-        React.createElement('div',{style:{fontSize:10,color:'#777',lineHeight:1.35,marginBottom:12}},'Cambiar un color lo aplica inmediatamente a todas las tarjetas de esa categoria, incluidas las que ya estan en el horario.'),
+        React.createElement('div',{style:{fontSize:14,fontWeight:600,marginBottom:4}},'🎨 Categorías y recompensas'),
+        React.createElement('div',{style:{fontSize:10,color:'#777',lineHeight:1.35,marginBottom:12}},'Configura el color y si las tarjetas de cada categoría muestran la animación al completarse.'),
         ...cats.map(c=>React.createElement('div',{key:c.id,style:{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:'1px solid #f1f1f1'}},
           React.createElement('div',{style:{width:18,height:18,borderRadius:'50%',background:c.color,border:'1px solid #ccc',flexShrink:0}}),
           React.createElement('span',{style:{flex:1,fontSize:11,color:'#333'}},c.name),
+          React.createElement('label',{title:'Animación al completar',style:{display:'flex',alignItems:'center',gap:3,fontSize:9,color:'#666',cursor:'pointer',whiteSpace:'nowrap'}},
+            React.createElement('input',{type:'checkbox',checked:c.completionAnimationEnabled!==false,onChange:e=>updateCategoryCompletionAnimation(c.id,e.target.checked)}),
+            React.createElement('span',null,'✨')
+          ),
           React.createElement('input',{type:'color',value:c.color,onChange:e=>updateCategoryColor(c.id,e.target.value),style:{width:36,height:28,padding:0,border:'none',background:'none',cursor:'pointer'}})
         )),
         React.createElement('button',{onClick:()=>setShowCatColors(false),style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0'}},'Cerrar')
@@ -1219,6 +1290,13 @@ function App(){
       )
     ),
 
+    completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'18%':'22%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.1s ease-out forwards',padding:'10px 16px',borderRadius:999,background:'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em',boxShadow:'0 10px 30px rgba(22,101,52,.3)'}},'Misión cumplida'),
+
+    starFx&&React.createElement(React.Fragment,null,
+      React.createElement('div',{style:{position:'fixed',left:'50%',top:'48%',zIndex:12030,pointerEvents:'none',fontSize:isMobile?72:92,color:'#fbbf24',filter:'drop-shadow(0 0 16px rgba(245,158,11,.75))',animation:'starFlight 1.45s cubic-bezier(.22,.8,.32,1) forwards'}},'★'),
+      ...[0,1,2,3,4].map(i=>React.createElement('div',{key:i,style:{position:'fixed',left:`${47+i*1.5}%`,top:`${55+i*2}%`,zIndex:12029,pointerEvents:'none',fontSize:10+i*2,color:'#fde68a',animation:`confettiFall ${.8+i*.12}s ease-out forwards`}},'✦'))
+    ),
+
     modal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setModal(null);},style:overlayStyle},
       React.createElement('div',{style:cardStyle},
         React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
@@ -1238,6 +1316,8 @@ function App(){
         React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
         React.createElement(Lbl,{t:'🔔 Notificarme antes'}),
         React.createElement(Sel,{val:modal.notif||0,onChange:v=>setModal({...modal,notif:parseInt(v)}),opts:[[0,'Sin notificacion'],[5,'5 minutos antes'],[10,'10 minutos antes'],[15,'15 minutos antes'],[30,'30 minutos antes'],[60,'1 hora antes']]}),
+        React.createElement(Lbl,{t:'Animación al completar'}),
+        React.createElement(Sel,{val:modal.completionAnimationOverride===null||modal.completionAnimationOverride===undefined?'inherit':(modal.completionAnimationOverride?'on':'off'),onChange:v=>setModal({...modal,completionAnimationOverride:v==='inherit'?null:v==='on'}),opts:[['inherit','Heredar de la categoría'],['on','Activada para esta tarjeta'],['off','Desactivada para esta tarjeta']]}),
         React.createElement('label',{style:{display:'flex',alignItems:'center',gap:7,fontSize:11,color:'#555',marginTop:10,cursor:'pointer'}},
           React.createElement('input',{type:'checkbox',checked:!!modal.fixed,onChange:e=>setModal({...modal,fixed:e.target.checked})}),
           React.createElement('span',null,'🔒 Fijar actividad (no mover con arrastre ni reorganizacion)')
