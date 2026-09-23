@@ -311,6 +311,7 @@ function App(){
   const [weeklyStars,setWeeklyStars]=useState({});
   const [completionFx,setCompletionFx]=useState(null);
   const [starFx,setStarFx]=useState(null);
+  const starPanelRef=useRef(null);
   const snapshotQueue=useRef(Promise.resolve());
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
@@ -780,8 +781,10 @@ function App(){
         setTimeout(()=>setCompletionFx(f=>f&&f.token===token?null:f),1100);
       }
       if(!wasDayComplete&&isDayComplete){
+        const panelBounds=starPanelRef.current?.getBoundingClientRect();
+        if(!panelBounds) return;
         const token=Date.now();
-        setStarFx({dk,token});
+        setStarFx({dk,token,x:panelBounds.left+panelBounds.width/2,y:panelBounds.top+panelBounds.height/2});
         setTimeout(()=>setStarFx(f=>f&&f.token===token?null:f),1500);
       }
     }
@@ -1005,7 +1008,7 @@ function App(){
   );
 
   return React.createElement('div',{style:{padding:isMobile?'8px':'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:isMobile?'100%':900,margin:'0 auto',overflowX:'hidden'}},
-    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}25%,75%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:calc(100% - 92px);top:70px;transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
+    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}25%,75%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:var(--star-target-x);top:var(--star-target-y);transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
 
     !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
       React.createElement('span',{style:{flex:1}},'🔔 Activa las notificaciones para recibir alertas antes de tus actividades'),
@@ -1024,7 +1027,7 @@ function App(){
         React.createElement('div',{style:{fontSize:11,color:'#888',marginTop:2}},`Hoy tienes ${(events[dateKey(td)]||[]).length} actividad(es)`)
       ),
       React.createElement('div',{style:{display:'flex',gap:isMobile?5:10,alignItems:'center',flexWrap:'wrap',justifyContent:'flex-end'}},
-        React.createElement('div',{'aria-label':`${completedStarDays.length} de 7 días completos`,style:{display:'flex',alignItems:'center',gap:5,padding:'4px 7px',border:'1px solid #fde68a',background:'#fffbeb',borderRadius:9,whiteSpace:'nowrap'}},
+        React.createElement('div',{ref:starPanelRef,'aria-label':`${completedStarDays.length} de 7 días completos`,style:{display:'flex',alignItems:'center',gap:5,padding:'4px 7px',border:'1px solid #fde68a',background:'#fffbeb',borderRadius:9,whiteSpace:'nowrap'}},
           React.createElement('span',{style:{fontSize:11,fontWeight:800,color:'#92400e'}},`${completedStarDays.length}/7`),
           React.createElement('span',{style:{display:'flex',gap:1}},...starWeekDays.map(d=>React.createElement('span',{key:dateKey(d),title:`${DAYS_ES[d.getDay()]} ${d.getDate()}`,style:{fontSize:isMobile?13:15,color:completedStarSet.has(dateKey(d))?'#f59e0b':'#d1d5db',filter:completedStarSet.has(dateKey(d))?'drop-shadow(0 1px 2px rgba(245,158,11,.45))':'none'}},completedStarSet.has(dateKey(d))?'★':'☆')))
         ),
@@ -1293,7 +1296,7 @@ function App(){
     completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'18%':'22%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.1s ease-out forwards',padding:'10px 16px',borderRadius:999,background:'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em',boxShadow:'0 10px 30px rgba(22,101,52,.3)'}},'Misión cumplida'),
 
     starFx&&React.createElement(React.Fragment,null,
-      React.createElement('div',{style:{position:'fixed',left:'50%',top:'48%',zIndex:12030,pointerEvents:'none',fontSize:isMobile?72:92,color:'#fbbf24',filter:'drop-shadow(0 0 16px rgba(245,158,11,.75))',animation:'starFlight 1.45s cubic-bezier(.22,.8,.32,1) forwards'}},'★'),
+      React.createElement('div',{style:{position:'fixed',left:'50%',top:'48%',zIndex:12030,pointerEvents:'none',fontSize:isMobile?72:92,color:'#fbbf24',filter:'drop-shadow(0 0 16px rgba(245,158,11,.75))',animation:'starFlight 1.45s cubic-bezier(.22,.8,.32,1) forwards','--star-target-x':`${starFx.x}px`,'--star-target-y':`${starFx.y}px`}},'★'),
       ...[0,1,2,3,4].map(i=>React.createElement('div',{key:i,style:{position:'fixed',left:`${47+i*1.5}%`,top:`${55+i*2}%`,zIndex:12029,pointerEvents:'none',fontSize:10+i*2,color:'#fde68a',animation:`confettiFall ${.8+i*.12}s ease-out forwards`}},'✦'))
     ),
 
