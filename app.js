@@ -762,13 +762,17 @@ function App(){
   }
 
   function delEvt(dk,id){setEvts({...events,[dk]:(events[dk]||[]).filter(e=>String(e.id)!==String(id))});}
-  function toggleDone(dk,id){
+  function toggleDone(dk,id,origin){
     const current=(events[dk]||[]).find(e=>String(e.id)===String(id));
     if(!current) return;
     const wasDayComplete=(events[dk]||[]).length>0&&(events[dk]||[]).every(e=>e.done);
     const willDone=!current.done;
     const nextEvents={...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:willDone}:e)};
-    const isDayComplete=(nextEvents[dk]||[]).length>0&&(nextEvents[dk]||[]).every(e=>e.done);
+    const dayEvents=nextEvents[dk]||[];
+    const dayDone=dayEvents.filter(e=>e.done).length;
+    const dayTotal=dayEvents.length;
+    const dayPct=dayTotal?Math.round(dayDone/dayTotal*100):0;
+    const isDayComplete=dayTotal>0&&dayDone===dayTotal;
     setEvts(nextEvents);
     if(willDone){
       const category=catById(current.cat);
@@ -777,14 +781,16 @@ function App(){
         :current.completionAnimationOverride;
       if(enabled){
         const token=Date.now();
-        setCompletionFx({key:`${dk}:${id}`,token});
-        setTimeout(()=>setCompletionFx(f=>f&&f.token===token?null:f),1100);
+        setCompletionFx({key:`${dk}:${id}`,token,done:dayDone,total:dayTotal,pct:dayPct});
+        setTimeout(()=>setCompletionFx(f=>f&&f.token===token?null:f),1400);
       }
       if(!wasDayComplete&&isDayComplete){
         const panelBounds=starPanelRef.current?.getBoundingClientRect();
         if(!panelBounds) return;
         const token=Date.now();
-        setStarFx({dk,token,x:panelBounds.left+panelBounds.width/2,y:panelBounds.top+panelBounds.height/2});
+        const startX=origin?.x??window.innerWidth/2;
+        const startY=origin?.y??window.innerHeight*.65;
+        setStarFx({dk,token,startX,startY,x:panelBounds.left+panelBounds.width/2,y:panelBounds.top+panelBounds.height/2});
         setTimeout(()=>setStarFx(f=>f&&f.token===token?null:f),1500);
       }
     }
@@ -843,8 +849,8 @@ function App(){
   const canEditGoals=goalsReady&&isCurrentGoalWeek;
   const selectedTargets=isCurrentGoalWeek?goalTargets:weeklyGoalTargets[goalWeekKey];
   const weekGoalStats=weeklyGoalStats(events,goalWeekDays,selectedTargets);
-  const starWeekDays=getWeekDays(td);
-  const completedStarDays=completedDaysForWeek(events,td);
+  const starWeekDays=getWeekDays(cursor);
+  const completedStarDays=completedDaysForWeek(events,cursor);
   const completedStarSet=new Set(completedStarDays);
 
   function goalWeekNavigation(){
@@ -880,7 +886,7 @@ function App(){
     const fullLabel=baseCat.name+(ev.note?` · ${ev.note}`:'')+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'');
     const openEditor=()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null});
     const actions=[
-      ['✓',()=>toggleDone(dk,ev.id),ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
+      ['✓',e=>{const r=e.currentTarget.getBoundingClientRect();toggleDone(dk,ev.id,{x:r.left+r.width/2,y:r.top+r.height/2});},ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
       ['✎',openEditor,'rgba(0,0,0,0.1)','Editar'],
       ...(!compact&&!ev.fixed&&!ev.done?[['↪',()=>reprogramEvent(dk,ev.id),'rgba(0,0,0,0.1)','Reprogramar en espacio libre']]:[]),
       ['✕',()=>delEvt(dk,ev.id),'rgba(0,0,0,0.1)','Eliminar']
@@ -912,7 +918,7 @@ function App(){
         ...actions.map(([ico,fn,bg,label])=>React.createElement('button',{
           key:ico,title:label,
           onMouseDown:e=>e.stopPropagation(),
-          onClick:e=>{e.stopPropagation();fn();},
+          onClick:e=>{e.stopPropagation();fn(e);},
           style:{width:compact?13:14,height:compact?13:14,borderRadius:3,border:'none',cursor:'pointer',fontSize:compact?7:8,display:'flex',alignItems:'center',justifyContent:'center',background:bg,color:th.text,padding:0,flexShrink:0,lineHeight:1}
         },ico))
       )
@@ -1008,7 +1014,7 @@ function App(){
   );
 
   return React.createElement('div',{style:{padding:isMobile?'8px':'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:isMobile?'100%':900,margin:'0 auto',overflowX:'hidden'}},
-    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}25%,75%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:var(--star-target-x);top:var(--star-target-y);transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
+    React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}20%,78%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes missionProgress{from{transform:scaleX(0)}to{transform:scaleX(1)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:var(--star-target-x);top:var(--star-target-y);transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
 
     !notifGranted&&'Notification' in window&&React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,padding:'8px 12px',background:'#FFF8E1',borderRadius:8,border:'1px solid #FFD54F',marginBottom:10,fontSize:12,color:'#5D4037'}},
       React.createElement('span',{style:{flex:1}},'🔔 Activa las notificaciones para recibir alertas antes de tus actividades'),
@@ -1293,11 +1299,19 @@ function App(){
       )
     ),
 
-    completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'18%':'22%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.1s ease-out forwards',padding:'10px 16px',borderRadius:999,background:'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em',boxShadow:'0 10px 30px rgba(22,101,52,.3)'}},'Misión cumplida'),
+    completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'14%':'18%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.4s ease-out forwards',width:isMobile?'min(82vw,280px)':'300px',padding:'11px 14px',borderRadius:14,background:'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',boxShadow:'0 10px 30px rgba(22,101,52,.3)'}},
+      React.createElement('div',{style:{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:10,marginBottom:7}},
+        React.createElement('span',{style:{fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em'}},'Misión cumplida'),
+        React.createElement('span',{style:{fontSize:12,fontWeight:700,whiteSpace:'nowrap'}},`${completionFx.done}/${completionFx.total} · ${completionFx.pct}%`)
+      ),
+      React.createElement('div',{style:{height:7,borderRadius:99,overflow:'hidden',background:'rgba(255,255,255,.25)'}},
+        React.createElement('div',{style:{height:'100%',width:`${completionFx.pct}%`,borderRadius:99,background:'linear-gradient(90deg,#fde68a,#fbbf24)',transformOrigin:'left',animation:'missionProgress .65s cubic-bezier(.22,1,.36,1) forwards',boxShadow:'0 0 10px rgba(253,230,138,.8)'}})
+      )
+    ),
 
     starFx&&React.createElement(React.Fragment,null,
-      React.createElement('div',{style:{position:'fixed',left:'50%',top:'48%',zIndex:12030,pointerEvents:'none',fontSize:isMobile?72:92,color:'#fbbf24',filter:'drop-shadow(0 0 16px rgba(245,158,11,.75))',animation:'starFlight 1.45s cubic-bezier(.22,.8,.32,1) forwards','--star-target-x':`${starFx.x}px`,'--star-target-y':`${starFx.y}px`}},'★'),
-      ...[0,1,2,3,4].map(i=>React.createElement('div',{key:i,style:{position:'fixed',left:`${47+i*1.5}%`,top:`${55+i*2}%`,zIndex:12029,pointerEvents:'none',fontSize:10+i*2,color:'#fde68a',animation:`confettiFall ${.8+i*.12}s ease-out forwards`}},'✦'))
+      React.createElement('div',{style:{position:'fixed',left:`${starFx.startX}px`,top:`${starFx.startY}px`,zIndex:12030,pointerEvents:'none',fontSize:isMobile?72:92,color:'#fbbf24',filter:'drop-shadow(0 0 16px rgba(245,158,11,.75))',animation:'starFlight 1.45s cubic-bezier(.22,.8,.32,1) forwards','--star-target-x':`${starFx.x}px`,'--star-target-y':`${starFx.y}px`}},'★'),
+      ...[0,1,2,3,4].map(i=>React.createElement('div',{key:i,style:{position:'fixed',left:`${starFx.startX-18+i*9}px`,top:`${starFx.startY+12+i*5}px`,zIndex:12029,pointerEvents:'none',fontSize:10+i*2,color:'#fde68a',animation:`confettiFall ${.8+i*.12}s ease-out forwards`}},'✦'))
     ),
 
     modal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setModal(null);},style:overlayStyle},
