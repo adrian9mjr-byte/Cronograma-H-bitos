@@ -96,6 +96,19 @@ function completedDaysForWeek(events,date){
   });
 }
 
+function starDaysForWeek(events,weeklyStars,date){
+  const days=getWeekDays(date).map(dateKey), calculated=completedDaysForWeek(events,date);
+  if(days.some(dk=>(events[dk]||[]).length>0)) return calculated;
+  const saved=weeklyStars?.[weekKeyFromDate(date)];
+  return Array.isArray(saved)?saved.filter(dk=>days.includes(dk)):[];
+}
+
+function compactWeekRange(days){
+  const first=days[0], last=days[6], differentYears=first.getFullYear()!==last.getFullYear();
+  const label=d=>`${d.getDate()} ${MON_SH[d.getMonth()]}${differentYears?` ${d.getFullYear()}`:''}`;
+  return `${label(first)} – ${label(last)}`;
+}
+
 function starsByWeek(events,existing={}){
   const keys=new Set(Object.keys(existing||{}));
   Object.keys(events||{}).forEach(dk=>keys.add(weekKeyFromDate(new Date(dk+'T12:00:00'))));
@@ -915,6 +928,11 @@ function App(){
   const starWeekDays=getWeekDays(cursor);
   const completedStarDays=completedDaysForWeek(events,cursor);
   const completedStarSet=new Set(completedStarDays);
+  const recentStarWeeks=Array.from({length:4},(_,index)=>{
+    const date=addDays(td,-7*index), days=getWeekDays(date);
+    const count=starDaysForWeek(events,weeklyStars,date).length;
+    return {key:weekKeyFromDate(date),label:compactWeekRange(days),count};
+  });
 
   function goalWeekNavigation(){
     const format=d=>d.toLocaleDateString('es',{day:'numeric',month:'short',year:'numeric'});
@@ -1299,6 +1317,19 @@ function App(){
           canEditGoals&&editGoals&&React.createElement('input',{'aria-label':`Objetivo semanal de ${g.label}`,type:'number',min:0,max:21,value:g.target,onChange:e=>setGoalTarget(g.id,e.target.value),style:{width:52,fontSize:10,padding:'2px 4px',border:'1px solid #99f6e4',borderRadius:5,background:'#fff',color:'#134e4a'}}),
           React.createElement('span',{style:{fontWeight:700,color:g.target!==null&&g.done>=g.target?'#166534':'#0f766e',textAlign:'right'}},g.target===null?`${g.done} hechas · ${g.planned} plan. · Sin objetivo registrado`:`${g.done}/${g.target} hechas · ${g.planned} plan.`)
         ))
+      ),
+      React.createElement('div',{style:{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:10,padding:10,marginBottom:12}},
+        React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#92400e',marginBottom:8}},'⭐ Historial de estrellas'),
+        React.createElement('div',{style:{display:'grid',gap:6}},
+          ...recentStarWeeks.map(week=>React.createElement('div',{key:week.key,style:{display:'grid',gridTemplateColumns:isMobile?'minmax(0,1fr) auto':'minmax(115px,1fr) auto 32px',alignItems:'center',gap:isMobile?5:10,padding:'7px 8px',borderRadius:8,background:'rgba(255,255,255,.72)'}},
+            React.createElement('span',{style:{fontSize:10,fontWeight:600,color:'#78350f',whiteSpace:'nowrap'}},week.label),
+            isMobile&&React.createElement('span',{style:{fontSize:10,fontWeight:700,color:'#78350f',textAlign:'right'}},`${week.count}/7`),
+            React.createElement('span',{'aria-label':`${week.count} de 7 estrellas`,style:{gridColumn:isMobile?'1 / -1':'auto',display:'flex',gap:2,fontSize:17,lineHeight:1}},
+              ...Array.from({length:7},(_,starIndex)=>React.createElement('span',{key:starIndex,style:{color:starIndex<week.count?'#f59e0b':'#d1d5db',opacity:starIndex<week.count?1:.72}},starIndex<week.count?'★':'☆'))
+            ),
+            !isMobile&&React.createElement('span',{style:{fontSize:10,fontWeight:700,color:'#78350f',textAlign:'right'}},`${week.count}/7`)
+          ))
+        )
       ),
       React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:10}},
         ...[['Actividades',sTotal],['Completadas',sDone],['Cumplimiento',sPct+'%'],['Horas plan.',tH.toFixed(1)+'h'],['Horas comp.',dH.toFixed(1)+'h'],['Pendientes',sTotal-sDone]].map(([l,v])=>
