@@ -137,6 +137,23 @@ function cloneEventsMap(src){
   Object.entries(src||{}).forEach(([dk,arr])=>{out[dk]=(arr||[]).map(e=>({...e}));});
   return out;
 }
+function eventsAfterDrop(events,payload,targetDk,h,half,newId=Date.now()){
+  if(!payload) return{events,changed:false};
+  const next=cloneEventsMap(events);
+  if(payload.type==='new'){
+    if(!next[targetDk]) next[targetDk]=[];
+    next[targetDk]=[...next[targetDk],{id:newId,cat:payload.catId,note:'',h,half,dur:2,done:false,notif:0}];
+    return{events:next,changed:true};
+  }
+  const source=next[payload.dk]||[];
+  const event=source.find(item=>String(item.id)===String(payload.id));
+  if(!event||event.fixed) return{events,changed:false};
+  next[payload.dk]=source.filter(item=>String(item.id)!==String(payload.id));
+  if(!next[payload.dk].length) delete next[payload.dk];
+  if(!next[targetDk]) next[targetDk]=[];
+  next[targetDk]=[...next[targetDk],{...event,h,half}];
+  return{events:next,changed:true};
+}
 function dateForDow(weekDays,dow){return weekDays.find(d=>d.getDay()===dow);}
 function isFreeAt(evMap,dk,startMin,dur){
   const endMin=startMin+dur*30;
@@ -145,21 +162,31 @@ function isFreeAt(evMap,dk,startMin,dur){
     return overlaps(startMin,endMin,slotToMinutes(ev.h,ev.half||false)-buffer,eventEndMinutes(ev)+buffer);
   });
 }
-function findNextReprogramSlot(evMap,week,dur,after,now=new Date()){
+function reprogramSlotKey(dk,m){return`${dk}_${m}`;}
+function findReprogramOptions(evMap,week,dur,currentDk,triedSlots=[],now=new Date()){
   const todayStart=today();
+  const tried=new Set(triedSlots);
+  const options=[];
   for(const d of week){
     const dk=dateKey(d);
     const dayStart=new Date(d); dayStart.setHours(0,0,0,0);
     if(dayStart<todayStart) continue;
-    if(after&&dk<after.dk) continue;
+    if(dk===currentDk) continue;
     let startMin=CALENDAR_START_MIN;
-    if(after&&dk===after.dk) startMin=Math.max(startMin,after.m+30);
     if(dk===dateKey(now)) startMin=Math.max(startMin,Math.ceil((now.getHours()*60+now.getMinutes())/30)*30);
+    const slots=[];
     for(let m=startMin;m+dur*30<=CALENDAR_END_MIN;m+=30){
-      if(isFreeAt(evMap,dk,m,dur)) return{dk,m};
+      if(!tried.has(reprogramSlotKey(dk,m))&&isFreeAt(evMap,dk,m,dur)) slots.push(m);
     }
+    if(slots.length) options.push({dk,slots});
   }
-  return null;
+  return options;
+}
+function pickRandomReprogramSlot(evMap,week,dur,currentDk,triedSlots=[],now=new Date(),random=Math.random){
+  const options=findReprogramOptions(evMap,week,dur,currentDk,triedSlots,now);
+  if(!options.length) return null;
+  const day=options[Math.floor(random()*options.length)];
+  return{dk:day.dk,m:day.slots[Math.floor(random()*day.slots.length)]};
 }
 function countHoursForDay(evMap,dk){return (evMap[dk]||[]).reduce((s,e)=>s+(e.dur||1)*0.5,0);}
 function countTemplateForDay(evMap,dk,templateId){return (evMap[dk]||[]).filter(e=>e.templateId===templateId).length;}
@@ -338,6 +365,7 @@ function App(){
   
   const [dragEvt,setDragEvt]=useState(null);
   const [dragOver,setDragOver]=useState(null);
+  const dragToken=useRef(0);
   const saveTimer=useRef(null);
 
   useEffect(()=>{
@@ -496,6 +524,10 @@ function App(){
   }
 
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
+  function editorStateForEvent(ev,dk,extra={}){
+    const baseCat=catById(ev.cat);
+    return{dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null,...extra};
+  }
 
   function getPlannerWeekDays(){
     const td=today();
@@ -630,13 +662,16 @@ function App(){
     const ne=cloneEventsMap(events);
     ne[dk]=(ne[dk]||[]).filter(e=>String(e.id)!==String(id));
     if(ne[dk]&&ne[dk].length===0) delete ne[dk];
-    const after={dk,m:slotToMinutes(source.h,source.half||false)};
-    const found=findNextReprogramSlot(ne,week,source.dur||1,after);
+    const currentSlot=reprogramSlotKey(dk,slotToMinutes(source.h,source.half||false));
+    const priorTried=modal&&modal.evtId===String(id)?(modal.reprogramTriedSlots||[]):[];
+    const triedSlots=[...new Set([...priorTried,currentSlot])];
+    const found=pickRandomReprogramSlot(ne,week,source.dur||1,dk,triedSlots);
     if(!found){
-      const message='No hay otro espacio disponible más adelante esta semana.';
+      const message='No quedan otras opciones disponibles esta semana.';
       setPlannerMsg(message);
-      if(modal&&modal.evtId===String(id)) setModal(m=>m?{...m,reprogramMessage:message,reprogramError:true}:m);
-      else window.alert(message);
+      setModal(m=>m&&m.evtId===String(id)
+        ?{...m,reprogramTriedSlots:triedSlots,reprogramMessage:message,reprogramError:true}
+        :editorStateForEvent(source,dk,{reprogramTriedSlots:triedSlots,reprogramMessage:message,reprogramError:true}));
       return;
     }
     const slot=minutesToSlot(found.m);
@@ -647,7 +682,10 @@ function App(){
     const position=`${DAYS_ES[new Date(found.dk+'T12:00:00').getDay()].toLowerCase()} ${fmtH(slot.h,slot.half)}`;
     setPlannerMsg(`↪ ${catById(source.cat).name} reprogramada para ${position}.`);
     setView('week'); setCursor(week[0]);
-    setModal(m=>m&&m.evtId===String(id)?{...m,dk:found.dk,h:slot.h,half:slot.half,reprogramMessage:`↪ Reprogramada: ${position}`,reprogramError:false}:m);
+    const nextTried=[...triedSlots,reprogramSlotKey(found.dk,found.m)];
+    setModal(m=>m&&m.evtId===String(id)
+      ?{...m,dk:found.dk,h:slot.h,half:slot.half,reprogramTriedSlots:nextTried,reprogramMessage:`↪ Reprogramada: ${position}`,reprogramError:false}
+      :editorStateForEvent(moved,found.dk,{reprogramTriedSlots:nextTried,reprogramMessage:`↪ Reprogramada: ${position}`,reprogramError:false}));
   }
 
   // Función para manejar el archivo subido
@@ -820,22 +858,37 @@ function App(){
     setNcName('');setNcColor('#7F77DD');setShowNCF(false);
   }
 
-  function handleDrop(dk,h,half){
-    if(!dragEvt) return;
-    let ne={...events};
-    if(dragEvt.type==='new'){
-      if(!ne[dk]) ne[dk]=[];
-      ne[dk]=[...ne[dk],{id:Date.now(),cat:dragEvt.catId,note:'',h,half,dur:2,done:false,notif:0}];
-    } else {
-      const src=ne[dragEvt.dk]||[],ev=src.find(e=>String(e.id)===String(dragEvt.id));
-      if(ev){
-        if(ev.fixed){ setDragEvt(null); setDragOver(null); return; }
-        ne[dragEvt.dk]=src.filter(e=>String(e.id)!==String(dragEvt.id));
-        if(!ne[dk]) ne[dk]=[];
-        ne[dk]=[...ne[dk],{...ev,h,half}];
-      }
+  function beginDrag(e,payload){
+    const token=++dragToken.current;
+    if(e.dataTransfer){
+      const serialized=JSON.stringify(payload);
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('application/x-cronograma',serialized);
+      e.dataTransfer.setData('text/plain',serialized);
     }
-    setDragEvt(null);setDragOver(null);setEvts(ne);
+    e.currentTarget.style.opacity='0.4';
+    requestAnimationFrame(()=>{if(dragToken.current===token)setDragEvt(payload);});
+  }
+
+  function endDrag(e){
+    dragToken.current+=1;
+    if(e?.currentTarget) e.currentTarget.style.opacity='';
+    setDragEvt(null);
+    setDragOver(null);
+  }
+
+  function dragPayloadFromEvent(e){
+    if(!e.dataTransfer) return null;
+    const serialized=e.dataTransfer.getData('application/x-cronograma')||e.dataTransfer.getData('text/plain');
+    if(!serialized) return null;
+    try{return JSON.parse(serialized);}catch(error){return null;}
+  }
+
+  function handleDrop(dk,h,half,payload=dragEvt){
+    const result=eventsAfterDrop(events,payload,dk,h,half);
+    dragToken.current+=1;
+    setDragEvt(null);setDragOver(null);
+    if(result.changed) setEvts(result.events);
   }
 
   async function enableNotifications(){
@@ -893,8 +946,9 @@ function App(){
     const maxCols = ev.maxCols || 1;
     const widthPct = 100 / maxCols;
     const leftPct = col * widthPct;
+    const isDragging=dragEvt?.type==='existing'&&dragEvt.dk===dk&&String(dragEvt.id)===String(ev.id);
     const fullLabel=baseCat.name+(ev.note?` · ${ev.note}`:'')+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'');
-    const openEditor=()=>setModal({dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null});
+    const openEditor=()=>setModal(editorStateForEvent(ev,dk));
     const actions=[
       ['✓',e=>{const r=e.currentTarget.getBoundingClientRect();toggleDone(dk,ev.id,{x:r.left+r.width/2,y:r.top+r.height/2});},ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
       ['✎',openEditor,'rgba(0,0,0,0.1)','Editar'],
@@ -906,18 +960,18 @@ function App(){
       draggable:!ev.fixed,
       title:fullLabel+' · '+fmtH(ev.h,ev.half||false)+' · '+dl,
       onClick:()=>{if(compact)openEditor();},
-      onDragStart:()=>{if(!ev.fixed)setDragEvt({type:'existing',dk,id:ev.id});},
-      onDragEnd:()=>{setDragEvt(null);setDragOver(null);},
+      onDragStart:e=>{if(ev.fixed){e.preventDefault();return;}beginDrag(e,{type:'existing',dk,id:ev.id});},
+      onDragEnd:endDrag,
       style:{
         position:'absolute',
         left: `calc(${leftPct}% + 2px)`,
         width: `calc(${widthPct}% - 4px)`,
         top, height, borderRadius:5, padding:compact?'3px 48px 3px 4px':'3px 5px', cursor:ev.fixed?'default':'grab', zIndex:2, overflow:'hidden', display:'flex',
         flexDirection:'column', justifyContent:compact?'center':'space-between', background:th.bg, color:th.text,
-        borderLeft:`3px solid ${th.color}`, opacity:ev.done?0.5:1,
+        borderLeft:`3px solid ${th.color}`, opacity:isDragging?0.4:(ev.done?0.5:1),
         boxShadow:completionFx?.key===`${dk}:${ev.id}`?'0 0 0 2px #facc15, 0 0 18px #22c55e':'0 1px 3px rgba(0,0,0,0.15)',
         animation:completionFx?.key===`${dk}:${ev.id}`?'missionComplete .7s ease-out':'none',
-        pointerEvents: dragEvt ? 'none' : 'auto'
+        transition:'opacity .15s ease'
       }
     },
       React.createElement('div',{style:{fontSize:compact?9:12,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',lineHeight:1.2,color:th.text}},
@@ -927,7 +981,9 @@ function App(){
       React.createElement('div',{style:compact?{position:'absolute',right:2,top:3,display:'flex',gap:1,zIndex:4}:{display:'flex',gap:2,marginTop:1}},
         ...actions.map(([ico,fn,bg,label])=>React.createElement('button',{
           key:ico,title:label,
+          draggable:false,
           onMouseDown:e=>e.stopPropagation(),
+          onDragStart:e=>{e.preventDefault();e.stopPropagation();},
           onClick:e=>{e.stopPropagation();fn(e);},
           style:{width:compact?13:14,height:compact?13:14,borderRadius:3,border:'none',cursor:'pointer',fontSize:compact?7:8,display:'flex',alignItems:'center',justifyContent:'center',background:bg,color:th.text,padding:0,flexShrink:0,lineHeight:1}
         },ico))
@@ -982,6 +1038,7 @@ function App(){
 
     const handleColDragOver = e => {
       e.preventDefault(); e.stopPropagation();
+      if(e.dataTransfer) e.dataTransfer.dropEffect='move';
       const rect = e.currentTarget.getBoundingClientRect();
       const y = e.clientY - rect.top;
       const idx = Math.floor(y / SH);
@@ -997,7 +1054,7 @@ function App(){
       const idx = Math.floor(y / SH);
       const h = HS + Math.floor(idx / 2);
       const half = idx % 2 !== 0;
-      if(h >= HS && h < HE) { handleDrop(dk, h, half); }
+      if(h >= HS && h < HE) { handleDrop(dk,h,half,dragPayloadFromEvent(e)||dragEvt); }
     };
 
     return React.createElement('div',{
@@ -1125,7 +1182,8 @@ function App(){
         ...cats.map(c=>React.createElement('div',{
           key:c.id,
           draggable:true,
-          onDragStart:()=>setDragEvt({type:'new',catId:c.id}),
+          onDragStart:e=>beginDrag(e,{type:'new',catId:c.id}),
+          onDragEnd:endDrag,
           onClick:()=>setModal({dk:dateKey(cursor),evtId:null,cat:c.id,note:'',h:8,half:false,dur:2,color:c.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:0,fixed:false}),
           style:{display:'flex',alignItems:'center',gap:7,padding:'7px 10px',borderRadius:8,border:`1px solid ${c.color}55`,cursor:'grab',fontSize:12,fontWeight:500,userSelect:'none',background:c.bg,color:c.text}
         },
@@ -1357,7 +1415,7 @@ function App(){
         modal.evtId&&!modal.fixed&&(()=>{
           const modalEvent=(events[modal.dk]||[]).find(e=>String(e.id)===String(modal.evtId));
           const isDone=!!modalEvent?.done;
-          const buttonText=isDone?'✓ Desmarca la actividad para reprogramarla':modalEvent?.rescheduled?'↪ Probar siguiente hueco':'↪ Reprogramar en siguiente espacio libre de esta semana';
+          const buttonText=isDone?'✓ Desmarca la actividad para reprogramarla':modalEvent?.rescheduled?'↪ Probar otra ubicación':'↪ Reprogramar en siguiente espacio libre de esta semana';
           return React.createElement(React.Fragment,null,
             React.createElement('button',{onClick:()=>reprogramEvent(modal.dk,modal.evtId),disabled:isDone,style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0',background:isDone?'#f3f4f6':'#fff7ed',color:isDone?'#6b7280':'#9a3412',border:`1px solid ${isDone?'#d1d5db':'#fdba74'}`,cursor:isDone?'not-allowed':'pointer',opacity:isDone?0.85:1}},buttonText),
             modal.reprogramMessage&&React.createElement('div',{'aria-live':'polite',style:{fontSize:10,lineHeight:1.35,marginTop:6,color:modal.reprogramError?'#b91c1c':'#15803d'}},modal.reprogramMessage)
