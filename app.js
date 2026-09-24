@@ -7,6 +7,7 @@ const USER_ID = 'adrian_cronograma';
 const SH=30,HS=6,HE=24;
 const SLOTS=[];
 for(let h=HS;h<HE;h++){SLOTS.push({h,half:false});SLOTS.push({h,half:true});}
+const CALENDAR_START_MIN=HS*60,CALENDAR_END_MIN=HE*60;
 const DAYS_ES=['Domingo','Lunes','Martes','Miercoles','Jueves','Viernes','Sabado'];
 const DAYS_SH=['Dom','Lun','Mar','Mie','Jue','Vie','Sab'];
 const MON_ES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
@@ -143,6 +144,22 @@ function isFreeAt(evMap,dk,startMin,dur){
     const buffer=ev.fixed?30:0; // deja aire antes/despues de compromisos fijos
     return overlaps(startMin,endMin,slotToMinutes(ev.h,ev.half||false)-buffer,eventEndMinutes(ev)+buffer);
   });
+}
+function findNextReprogramSlot(evMap,week,dur,after,now=new Date()){
+  const todayStart=today();
+  for(const d of week){
+    const dk=dateKey(d);
+    const dayStart=new Date(d); dayStart.setHours(0,0,0,0);
+    if(dayStart<todayStart) continue;
+    if(after&&dk<after.dk) continue;
+    let startMin=CALENDAR_START_MIN;
+    if(after&&dk===after.dk) startMin=Math.max(startMin,after.m+30);
+    if(dk===dateKey(now)) startMin=Math.max(startMin,Math.ceil((now.getHours()*60+now.getMinutes())/30)*30);
+    for(let m=startMin;m+dur*30<=CALENDAR_END_MIN;m+=30){
+      if(isFreeAt(evMap,dk,m,dur)) return{dk,m};
+    }
+  }
+  return null;
 }
 function countHoursForDay(evMap,dk){return (evMap[dk]||[]).reduce((s,e)=>s+(e.dur||1)*0.5,0);}
 function countTemplateForDay(evMap,dk,templateId){return (evMap[dk]||[]).filter(e=>e.templateId===templateId).length;}
@@ -613,31 +630,24 @@ function App(){
     const ne=cloneEventsMap(events);
     ne[dk]=(ne[dk]||[]).filter(e=>String(e.id)!==String(id));
     if(ne[dk]&&ne[dk].length===0) delete ne[dk];
-    const now=new Date();
-    let found=null;
-    for(const d of week){
-      const targetDk=dateKey(d);
-      const dayStart=new Date(d); dayStart.setHours(0,0,0,0);
-      if(dayStart<today()) continue;
-      let startMin=PLAN_START_MIN;
-      if(targetDk===dateKey(now)){
-        const nowMin=now.getHours()*60+now.getMinutes()+15;
-        startMin=Math.max(startMin,Math.ceil(nowMin/30)*30);
-      }
-      for(let m=startMin;m+(source.dur||1)*30<=PLAN_END_MIN;m+=30){
-        if(!isFreeAt(ne,targetDk,m,source.dur||1)) continue;
-        found={dk:targetDk,m}; break;
-      }
-      if(found) break;
+    const after={dk,m:slotToMinutes(source.h,source.half||false)};
+    const found=findNextReprogramSlot(ne,week,source.dur||1,after);
+    if(!found){
+      const message='No hay otro espacio disponible más adelante esta semana.';
+      setPlannerMsg(message);
+      if(modal&&modal.evtId===String(id)) setModal(m=>m?{...m,reprogramMessage:message,reprogramError:true}:m);
+      else window.alert(message);
+      return;
     }
-    if(!found){window.alert('No encontre un espacio libre suficiente antes de terminar la semana. Puedes arrastrarla manualmente o liberar un bloque.');return;}
     const slot=minutesToSlot(found.m);
     const moved={...source,h:slot.h,half:slot.half,rescheduled:true,rescheduleCount:(source.rescheduleCount||0)+1};
     if(!ne[found.dk]) ne[found.dk]=[];
     ne[found.dk]=[...ne[found.dk],moved];
     setEvts(ne);
-    setPlannerMsg(`↪ ${catById(source.cat).name} reprogramada para ${DAYS_ES[new Date(found.dk+'T12:00:00').getDay()]} ${fmtH(slot.h,slot.half)}.`);
-    setView('week'); setCursor(week[0]); setModal(null);
+    const position=`${DAYS_ES[new Date(found.dk+'T12:00:00').getDay()].toLowerCase()} ${fmtH(slot.h,slot.half)}`;
+    setPlannerMsg(`↪ ${catById(source.cat).name} reprogramada para ${position}.`);
+    setView('week'); setCursor(week[0]);
+    setModal(m=>m&&m.evtId===String(id)?{...m,dk:found.dk,h:slot.h,half:slot.half,reprogramMessage:`↪ Reprogramada: ${position}`,reprogramError:false}:m);
   }
 
   // Función para manejar el archivo subido
@@ -1344,7 +1354,15 @@ function App(){
           React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
           modal.rep==='custom'&&React.createElement(RepGrid,{days:modal.repDays,toggle:i=>setModal({...modal,repDays:modal.repDays.map((v,j)=>j===i?!v:v)})})
         ),
-        modal.evtId&&!modal.fixed&&React.createElement('button',{onClick:()=>reprogramEvent(modal.dk,modal.evtId),disabled:(events[modal.dk]||[]).find(e=>String(e.id)===String(modal.evtId))?.done,style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0',background:'#fff7ed',color:'#9a3412',border:'1px solid #fdba74'}},'↪ Reprogramar en siguiente espacio libre de esta semana'),
+        modal.evtId&&!modal.fixed&&(()=>{
+          const modalEvent=(events[modal.dk]||[]).find(e=>String(e.id)===String(modal.evtId));
+          const isDone=!!modalEvent?.done;
+          const buttonText=isDone?'✓ Desmarca la actividad para reprogramarla':modalEvent?.rescheduled?'↪ Probar siguiente hueco':'↪ Reprogramar en siguiente espacio libre de esta semana';
+          return React.createElement(React.Fragment,null,
+            React.createElement('button',{onClick:()=>reprogramEvent(modal.dk,modal.evtId),disabled:isDone,style:{...btnBase,width:'100%',marginTop:12,padding:'7px 0',background:isDone?'#f3f4f6':'#fff7ed',color:isDone?'#6b7280':'#9a3412',border:`1px solid ${isDone?'#d1d5db':'#fdba74'}`,cursor:isDone?'not-allowed':'pointer',opacity:isDone?0.85:1}},buttonText),
+            modal.reprogramMessage&&React.createElement('div',{'aria-live':'polite',style:{fontSize:10,lineHeight:1.35,marginTop:6,color:modal.reprogramError?'#b91c1c':'#15803d'}},modal.reprogramMessage)
+          );
+        })(),
         React.createElement('div',{style:{display:'flex',gap:8,marginTop:14}},
           React.createElement('button',{onClick:()=>setModal(null),style:{...btnBase,flex:1,padding:'7px 0'}},'Cancelar'),
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
