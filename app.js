@@ -24,6 +24,7 @@ const PROJECT_CATS=[
   {id:'reset',name:'Reset',color:'#888780',bg:'#F1EFE8',text:'#2C2C2A'},
   {id:'vida',name:'Vida personal',color:'#D4537E',bg:'#FBEAF0',text:'#4B1528'},
   {id:'revision',name:'Revision semanal',color:'#475569',bg:'#E2E8F0',text:'#1E293B'},
+  {id:'secondary',name:'Misión secundaria',color:'#7C3AED',bg:'#F3E8FF',text:'#581C87'},
 ];
 const DEFAULT_CATS=PROJECT_CATS.map(c=>({...c,completionAnimationEnabled:true}));
 const PLANNER_ID='movimiento-real-v1';
@@ -88,6 +89,121 @@ const DEFAULT_MANUAL_MISSIONS=[
 ];
 function freshDefaultMissions(){return DEFAULT_MANUAL_MISSIONS.map(m=>({...m}));}
 function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
+
+// Una misión conserva su identidad; cada semana guarda su propio resultado.
+function cleanSecondaryText(text){return String(text||'').trim().replace(/^(?:[-•*–—]\s*)+/,'').replace(/\s+/g,' ').trim();}
+function normalizeSecondaryText(text){return cleanSecondaryText(text).toLocaleLowerCase('es');}
+function activeSecondary(m){return m.status==='pending'||m.status==='scheduled';}
+function secondaryHistoryStatus(status){
+  return {
+    pending:{icon:'○',label:'Pendiente',color:'#581c87'},
+    scheduled:{icon:'◷',label:'Programada',color:'#6b21a8'},
+    unfulfilled:{icon:'○',label:'No cumplida',color:'#581c87'},
+    completed:{icon:'✓',label:'Completada',color:'#15803d'},
+    cancelled:{icon:'✕',label:'Cancelada',color:'#6b7280'}
+  }[status]||{icon:'○',label:'Pendiente',color:'#581c87'};
+}
+function secondaryTargetWeek(m){
+  const created=new Date(m.createdAt);
+  return m.targetWeek||m.scheduledWeek||weekKeyFromDate(addDays(Number.isNaN(created.getTime())?today():created,7));
+}
+function retargetSecondaryMission(m,week,now=new Date()){
+  const currentWeek=weekKeyFromDate(now);
+  const history=Object.fromEntries(Object.entries(m.history||{}).filter(([wk,row])=>wk<currentWeek||['completed','cancelled','unfulfilled'].includes(row.status)));
+  history[week]={...(history[week]||{}),text:m.text,status:'pending'};
+  return {...m,targetWeek:week,history};
+}
+function secondaryEligibleForWeek(m,week){return m.status==='pending'&&secondaryTargetWeek(m)<=week;}
+function parseSecondaryMissions(value){
+  try{
+    const rows=typeof value==='string'?JSON.parse(value):value;
+    if(!Array.isArray(rows)) return [];
+    return rows.filter(m=>m&&typeof m.id==='string'&&cleanSecondaryText(m.text)&&['pending','scheduled','completed','cancelled'].includes(m.status))
+      .map(m=>{
+        const {carryWeek,...fields}=m;
+        const targetWeek=secondaryTargetWeek(m);
+        const history=m.history&&typeof m.history==='object'&&!Array.isArray(m.history)?m.history:{};
+        return {...fields,text:cleanSecondaryText(m.text),normalizedText:normalizeSecondaryText(m.text),targetWeek,weeksCarried:Number.isFinite(m.weeksCarried)?m.weeksCarried:0,history:Object.fromEntries(Object.entries(history).filter(([wk,row])=>m.targetWeek||wk>=targetWeek||['completed','cancelled','unfulfilled'].includes(row?.status)))};
+      });
+  }catch(e){return [];}
+}
+function addSecondaryLines(missions,text,now=new Date(),newId=()=> 'secondary_'+Date.now()+'_'+Math.random()){
+  const next=[...missions],seen=new Set(missions.filter(activeSecondary).map(m=>normalizeSecondaryText(m.text)));
+  let added=0,duplicates=0;
+  String(text).split(/\r\n|\n|\r/).forEach(line=>{
+    const text=cleanSecondaryText(line),normalizedText=normalizeSecondaryText(text);
+    if(!text) return;
+    if(seen.has(normalizedText)){duplicates++;return;}
+    seen.add(normalizedText);added++;
+    const targetWeek=weekKeyFromDate(addDays(now,7));
+    next.push({id:newId(),text,normalizedText,createdAt:now.toISOString(),status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,completedAt:null,cancelledAt:null,weeksCarried:0,targetWeek,history:{[targetWeek]:{text,status:'pending'}}});
+  });
+  return {missions:next,added,duplicates};
+}
+function rolloverSecondaryMissions(missions,now=new Date()){
+  const currentWeek=weekKeyFromDate(now);
+  return missions.map(original=>{
+    if(!activeSecondary(original)) return original;
+    let m={...original,history:{...original.history}};
+    let week=secondaryTargetWeek(m);
+    if(week>currentWeek) return {...m,targetWeek:week};
+    while(week<currentWeek){
+      m.history[week]={...(m.history[week]||{}),text:m.history[week]?.text||m.text,status:'unfulfilled'};
+      week=weekKeyFromDate(addDays(new Date(week+'T12:00:00'),7));
+      m.weeksCarried=(m.weeksCarried||0)+1;
+      if(!m.history[week]) m.history[week]={text:m.text,status:'pending'};
+    }
+    m.targetWeek=week;
+    if(m.scheduledWeek&&m.scheduledWeek<currentWeek){
+      m.status='pending';m.scheduledWeek=null;m.scheduledDate=null;m.linkedEventId=null;
+    }
+    return m;
+  });
+}
+function reconcileSecondaryMissions(missions,events,now=new Date()){
+  const currentWeek=weekKeyFromDate(now);
+  const rolled=rolloverSecondaryMissions(missions,now);
+  return rolled.map(original=>{
+    if(original.status==='cancelled') return original;
+    const linked=Object.entries(events).flatMap(([dk,rows])=>rows.filter(e=>e.secondaryMissionId===original.id).map(e=>({dk,e})))
+      .filter(({dk,e})=>weekKeyFromDate(new Date(dk+'T12:00:00'))>=currentWeek||String(e.id)===String(original.linkedEventId))
+      .sort((a,b)=>b.dk.localeCompare(a.dk))[0];
+    if(!linked){
+      if(original.status!=='scheduled') return original;
+      const week=original.scheduledWeek;
+      return {...original,status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,history:{...original.history,[week]:{...original.history[week],status:'pending'}}};
+    }
+    const {dk,e}=linked,week=weekKeyFromDate(new Date(dk+'T12:00:00'));
+    const completedAt=e.done?(original.completedAt||now.toISOString()):null;
+    const history=week===secondaryTargetWeek(original)?{...original.history}:retargetSecondaryMission(original,week,now).history;
+    history[week]={text:e.note||original.text,status:e.done?'completed':'scheduled',date:dk,h:e.h,half:!!e.half,eventId:e.id,completedAt};
+    return {...original,targetWeek:week,text:e.note||original.text,normalizedText:normalizeSecondaryText(e.note||original.text),status:e.done?'completed':'scheduled',scheduledWeek:week,scheduledDate:dk,linkedEventId:e.id,completedAt,history};
+  });
+}
+function pickSecondarySlot(events,week,now=new Date(),random=Math.random){
+  const options=[];
+  for(const d of week){
+    const dk=dateKey(d),day=new Date(d);day.setHours(0,0,0,0);
+    const todayStart=new Date(now);todayStart.setHours(0,0,0,0);
+    if(day<todayStart) continue;
+    const existing=(events[dk]||[]).filter(e=>e.secondaryMissionId);
+    const start=dk===dateKey(now)?Math.max(CALENDAR_START_MIN,Math.ceil((now.getHours()*60+now.getMinutes())/30)*30):CALENDAR_START_MIN;
+    const slots=[];
+    for(let m=start;m+60<=CALENDAR_END_MIN;m+=30) if(isFreeAt(events,dk,m,2)) slots.push(m);
+    if(slots.length) options.push({dk,slots,existing});
+  }
+  if(!options.length) return null;
+  let eligible=options.filter(day=>!day.existing.length);
+  if(!eligible.length){
+    eligible=options.map(day=>({...day,slots:day.slots.filter(m=>day.existing.every(e=>m>=eventEndMinutes(e)+180||m+60<=slotToMinutes(e.h,e.half)-180))})).filter(day=>day.slots.length);
+  }
+  if(!eligible.length) eligible=options;
+  const day=eligible[Math.floor(random()*eligible.length)];
+  return {dk:day.dk,m:day.slots[Math.floor(random()*day.slots.length)]};
+}
+function secondaryEvent(mission,dk,m,newId='secondary_event_'+Date.now()+'_'+Math.random()){
+  return {id:newId,secondaryMissionId:mission.id,cat:'secondary',note:mission.text,...minutesToSlot(m),dur:2,done:false,notif:0,fixed:false,completionAnimationOverride:null};
+}
 
 function completedDaysForWeek(events,date){
   return getWeekDays(date).map(dateKey).filter(dk=>{
@@ -154,6 +270,7 @@ function eventsAfterDrop(events,payload,targetDk,h,half,newId=Date.now()){
   if(!payload) return{events,changed:false};
   const next=cloneEventsMap(events);
   if(payload.type==='new'){
+    if(payload.catId==='secondary') return {events,changed:false,error:'Crea esta acción desde Misiones secundarias.'};
     if(!next[targetDk]) next[targetDk]=[];
     next[targetDk]=[...next[targetDk],{id:newId,cat:payload.catId,note:'',h,half,dur:2,done:false,notif:0}];
     return{events:next,changed:true};
@@ -163,6 +280,15 @@ function eventsAfterDrop(events,payload,targetDk,h,half,newId=Date.now()){
   if(!event||event.fixed) return{events,changed:false};
   next[payload.dk]=source.filter(item=>String(item.id)!==String(payload.id));
   if(!next[payload.dk].length) delete next[payload.dk];
+  if(event.secondaryMissionId){
+    if(weekKeyFromDate(new Date(payload.dk+'T12:00:00'))<weekKeyFromDate(today())){
+      return {events,changed:false,error:'Esta tarjeta pertenece al historial. Programa el pendiente desde la bandeja.'};
+    }
+    const when=new Date(targetDk+'T00:00:00');when.setHours(h,half?30:0,0,0);
+    if(when<new Date()||slotToMinutes(h,half)+60>CALENDAR_END_MIN||!isFreeAt(next,targetDk,slotToMinutes(h,half),2)){
+      return {events,changed:false,error:'Elige un bloque futuro de 1 hora libre para esta acción.'};
+    }
+  }
   if(!next[targetDk]) next[targetDk]=[];
   next[targetDk]=[...next[targetDk],{...event,h,half}];
   return{events:next,changed:true};
@@ -302,8 +428,8 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{}};
-  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{}};
+  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
+  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
   data.forEach(row=>{
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
@@ -311,6 +437,7 @@ async function loadFromDB(){
     if(row.key==='weeklyMissions') try{result.weeklyMissions=JSON.parse(row.value)||{};}catch(e){}
     if(row.key==='weeklyGoalTargets') try{result.weeklyGoalTargets=JSON.parse(row.value)||{};}catch(e){}
     if(row.key==='weeklyStars') try{result.weeklyStars=JSON.parse(row.value)||{};}catch(e){}
+    if(row.key==='secondaryMissions') result.secondaryMissions=parseSecondaryMissions(row.value);
   });
   result.events=migrateLegacyEvents(result.events);
   result.cats=mergeProjectCats(result.cats);
@@ -320,12 +447,15 @@ async function loadFromDB(){
 }
 
 async function saveToDB(key,value){
-  const{data}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).single();
+  const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).maybeSingle();
+  if(error) throw error;
+  let result;
   if(data){
-    await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key);
+    result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key);
   } else {
-    await sb.from('cronograma').insert({user_id:USER_ID,key,value:JSON.stringify(value)});
+    result=await sb.from('cronograma').insert({user_id:USER_ID,key,value:JSON.stringify(value)});
   }
+  if(result.error) throw result.error;
 }
 
 const {useState,useEffect,useRef}=React;
@@ -342,6 +472,7 @@ const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',
 function App(){
   const [cats,setCats]=useState(DEFAULT_CATS);
   const [events,setEvents]=useState({});
+  const eventsRef=useRef({});
   const [view,setView]=useState('day');
   const [cursor,setCursor]=useState(today());
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
@@ -366,6 +497,13 @@ function App(){
   const [currentGoalWeek,setCurrentGoalWeek]=useState(()=>weekKeyFromDate(today()));
   const [goalsReady,setGoalsReady]=useState(false);
   const [weeklyStars,setWeeklyStars]=useState({});
+  const [secondaryMissions,setSecondaryMissions]=useState([]);
+  const secondaryRef=useRef([]);
+  const secondarySaveQueue=useRef(Promise.resolve());
+  const [showSecondary,setShowSecondary]=useState(false);
+  const [secondaryText,setSecondaryText]=useState('');
+  const [secondaryMessage,setSecondaryMessage]=useState('');
+  const [secondaryEdit,setSecondaryEdit]=useState(null);
   const [completionFx,setCompletionFx]=useState(null);
   const [starFx,setStarFx]=useState(null);
   const starPanelRef=useRef(null);
@@ -386,11 +524,16 @@ function App(){
       try{
         const data=await loadFromDB();
         setEvents(data.events);
+        eventsRef.current=data.events;
         setCats(data.cats);
         setGoalTargets(data.goals||{...DEFAULT_GOAL_TARGETS});
         setWeeklyMissions(data.weeklyMissions||{});
         setWeeklyGoalTargets(data.weeklyGoalTargets||{});
         setWeeklyStars(data.weeklyStars||{});
+        const missions=reconcileSecondaryMissions(data.secondaryMissions||[],data.events);
+        secondaryRef.current=missions;
+        setSecondaryMissions(missions);
+        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions,data.events);
         setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
         scheduleEventsNotifications(data.events, data.cats);
@@ -403,6 +546,28 @@ function App(){
       }
     })();
   },[]);
+
+  useEffect(()=>{
+    if(!loaded) return;
+    const rollover=()=>{
+      const next=rolloverSecondaryMissions(secondaryRef.current);
+      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,events);
+    };
+    rollover();
+    const timer=setInterval(rollover,60000);
+    return()=>clearInterval(timer);
+  },[loaded,events]);
+
+  function persistSecondary(next,evts=events){
+    secondaryRef.current=next;
+    setSecondaryMissions(next);
+    // Reutiliza key/value sin requerir índices nuevos; serializa misiones y eventos.
+    secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(async()=>{
+      await saveToDB('secondaryMissions',next);
+      await saveToDB('events',evts);
+    });
+    secondarySaveQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar acciones; vuelve a intentar'}));
+  }
 
   // Detectar el cambio de semana incluso si la app permanece abierta.
   useEffect(()=>{
@@ -447,15 +612,20 @@ function App(){
     setSync({dot:'#BA7517',msg:'Guardando...'});
     saveTimer.current=setTimeout(async()=>{
       try{
-        await Promise.all([saveToDB('events',evts),saveToDB('cats',ct),saveToDB('goals',goals)]);
+        const latestEvents=eventsRef.current;
+        secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(()=>Promise.all([saveToDB('events',latestEvents),saveToDB('cats',ct),saveToDB('goals',goals)]));
+        await secondarySaveQueue.current;
         const n=new Date();
         setSync({dot:'#1D9E75',msg:`Guardado ${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`});
-        scheduleEventsNotifications(evts,ct);
+        scheduleEventsNotifications(latestEvents,ct);
       }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar'});}
     },800);
   }
 
   function setEvts(e){
+    eventsRef.current=e;
+    const next=reconcileSecondaryMissions(secondaryRef.current,e);
+    if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,e);
     setEvents(e);
     scheduleSave(e,cats,goalTargets);
     persistWeeklyStars(starsByWeek(e,weeklyStars));
@@ -537,9 +707,58 @@ function App(){
   }
 
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
+  const normalCats=cats.filter(c=>c.id!=='secondary');
   function editorStateForEvent(ev,dk,extra={}){
     const baseCat=catById(ev.cat);
-    return{dk,evtId:String(ev.id),cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null,...extra};
+    return{dk,evtId:String(ev.id),secondaryMissionId:ev.secondaryMissionId,cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null,...extra};
+  }
+
+  function addSecondaryActions(){
+    const result=addSecondaryLines(rolloverSecondaryMissions(secondaryRef.current),secondaryText);
+    persistSecondary(result.missions);
+    setSecondaryText('');
+    setSecondaryMessage(`${result.added} acciones agregadas · ${result.duplicates} ya existían`);
+  }
+  function cancelSecondary(id){
+    const mission=secondaryRef.current.find(m=>m.id===id);
+    if(!mission||!activeSecondary(mission)) return;
+    const week=weekKeyFromDate(today()),now=new Date().toISOString();
+    const history=Object.fromEntries(Object.entries(mission.history).map(([wk,row])=>[wk,wk>=week?{...row,status:'cancelled',cancelledAt:now}:row]));
+    history[week]={text:mission.text,status:'cancelled',cancelledAt:now};
+    const next=secondaryRef.current.map(m=>m.id===id?{...m,status:'cancelled',cancelledAt:now,linkedEventId:null,scheduledDate:null,scheduledWeek:null,history}:m);
+    const ne=cloneEventsMap(events);
+    Object.keys(ne).forEach(dk=>{if(weekKeyFromDate(new Date(dk+'T12:00:00'))>=week) ne[dk]=ne[dk].filter(e=>e.secondaryMissionId!==id);});
+    persistSecondary(next,ne);setEvts(ne);
+    setSecondaryMessage('Acción cancelada; se conserva en el historial.');
+  }
+  function saveSecondaryText(){
+    if(!secondaryEdit) return;
+    const text=cleanSecondaryText(secondaryEdit.text),normalizedText=normalizeSecondaryText(text);
+    if(!text){setSecondaryMessage('Escribe una acción.');return;}
+    if(secondaryRef.current.some(m=>m.id!==secondaryEdit.id&&activeSecondary(m)&&normalizeSecondaryText(m.text)===normalizedText)){
+      setSecondaryMessage('Ya existe una acción activa con ese texto.');return;
+    }
+    const week=weekKeyFromDate(today());
+    const next=secondaryRef.current.map(m=>m.id===secondaryEdit.id?{...m,text,normalizedText,history:Object.fromEntries(Object.entries(m.history).map(([wk,row])=>[wk,wk>=week?{...row,text}:row]))}:m);
+    const ne=cloneEventsMap(events);
+    Object.keys(ne).forEach(dk=>{if(weekKeyFromDate(new Date(dk+'T12:00:00'))>=week) ne[dk]=ne[dk].map(e=>e.secondaryMissionId===secondaryEdit.id?{...e,note:text}:e);});
+    persistSecondary(next,ne);setEvts(ne);setSecondaryEdit(null);setSecondaryMessage('Acción actualizada.');
+  }
+  function scheduleSecondary(id){
+    const next=rolloverSecondaryMissions(secondaryRef.current),mission=next.find(m=>m.id===id);
+    if(!mission||mission.status!=='pending') return;
+    const slot=pickSecondarySlot(events,getWeekDays(today()));
+    if(!slot){setSecondaryMessage('No hay un bloque libre de 1 hora esta semana. La acción sigue pendiente.');return;}
+    const event=secondaryEvent(mission,slot.dk,slot.m);
+    const ne={...events,[slot.dk]:[...(events[slot.dk]||[]),event]};
+    persistSecondary(reconcileSecondaryMissions(next,ne),ne);setEvts(ne);
+    setSecondaryMessage(`◆ ${mission.text}: ${slot.dk} ${fmtH(event.h,event.half)}`);
+  }
+  function chooseSecondaryDate(id){
+    const mission=secondaryRef.current.find(m=>m.id===id);
+    if(!mission||mission.status!=='pending') return;
+    setShowSecondary(false);
+    setModal({...editorStateForEvent(secondaryEvent(mission,dateKey(today()),8*60),dateKey(today())),evtId:null,secondaryMissionId:id});
   }
 
   function getPlannerWeekDays(){
@@ -651,6 +870,14 @@ function App(){
         }];
       }
     });
+    const missions=rolloverSecondaryMissions(secondaryRef.current);
+    missions.filter(m=>secondaryEligibleForWeek(m,weekKeyFromDate(weekDays[0]))).forEach(m=>{
+      if(Object.entries(ne).some(([dk,rows])=>weekKeyFromDate(new Date(dk+'T12:00:00'))>=weekKeyFromDate(today())&&rows.some(e=>e.secondaryMissionId===m.id))) return;
+      const slot=pickSecondarySlot(ne,weekDays);
+      if(!slot){unscheduled.push(m.text);return;}
+      ne[slot.dk]=[...(ne[slot.dk]||[]),secondaryEvent(m,slot.dk,slot.m)];
+    });
+    persistSecondary(reconcileSecondaryMissions(missions,ne),ne);
     setEvts(ne);
     setView('week');
     setCursor(weekDays[0]);
@@ -737,7 +964,7 @@ function App(){
       // Usamos propagación (...) para conservar las actividades manuales que ya tenías
       ne[dk] = [...ne[dk], {
         id: Date.now() + '_' + Math.random(),
-        cat: ev.cat,
+        cat: ev.cat==='secondary'?normalCats[0].id:ev.cat,
         note: ev.summary,
         h, half, dur, done: false, notif: 0, fixed: true, source: 'calendar-import'
       }];
@@ -770,6 +997,7 @@ function App(){
   }
 
   function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif,fixed=false,completionAnimationOverride=null){
+    if(cat==='secondary') return base;
     const rd=getRepDays(repType,cd);
     if(!rd.length) return base;
     const out={...base};
@@ -788,6 +1016,7 @@ function App(){
   }
 
   function addFromForm(){
+    if(form.cat==='secondary') return;
     const[h,hf]=form.hour.split('_');
     const half=hf==='1',hi=parseInt(h);
     const dk=form.date;
@@ -807,6 +1036,31 @@ function App(){
 
   function saveModal(){
     if(!modal) return;
+    if(modal.cat==='secondary'&&!modal.secondaryMissionId) return;
+    if(modal.secondaryMissionId){
+      const mission=secondaryRef.current.find(m=>m.id===modal.secondaryMissionId);
+      const text=cleanSecondaryText(modal.note),normalizedText=normalizeSecondaryText(text);
+      if(!mission||mission.status==='cancelled'){window.alert('Esta acción ya no está activa.');return;}
+      if(!text||secondaryRef.current.some(m=>m.id!==mission.id&&activeSecondary(m)&&normalizeSecondaryText(m.text)===normalizedText)){
+        window.alert('Escribe una acción distinta de las otras acciones activas.');return;
+      }
+      const ne=cloneEventsMap(events),source=Object.entries(ne).flatMap(([dk,rows])=>rows.filter(e=>String(e.id)===String(modal.evtId)).map(e=>({dk,e})))[0];
+      if(source&&weekKeyFromDate(new Date(source.dk+'T12:00:00'))<weekKeyFromDate(today())){
+        window.alert('Esta tarjeta pertenece al historial. Programa el pendiente desde la bandeja.');return;
+      }
+      if(!source&&mission.status!=='pending'){window.alert('La acción ya está programada. Abre su tarjeta.');return;}
+      if(source){ne[source.dk]=ne[source.dk].filter(e=>String(e.id)!==String(source.e.id));}
+      const when=new Date(modal.dk+'T00:00:00');when.setHours(modal.h,modal.half?30:0,0,0);
+      const start=slotToMinutes(modal.h,modal.half);
+      const samePosition=source&&source.dk===modal.dk&&source.e.h===modal.h&&!!source.e.half===!!modal.half;
+      if(!samePosition&&(when<new Date()||start+60>CALENDAR_END_MIN||!isFreeAt(ne,modal.dk,start,2))){
+        window.alert('Elige un bloque futuro de 1 hora libre, respetando los buffers de actividades fijas.');return;
+      }
+      const colorChanged=modal.color!==catById('secondary').color;
+      const event={...(source?.e||secondaryEvent(mission,modal.dk,start)),note:text,h:modal.h,half:modal.half,dur:2,notif:modal.notif||0,fixed:!!modal.fixed,completionAnimationOverride:modal.completionAnimationOverride,customColor:colorChanged?modal.color:null,customTheme:colorChanged?autoTheme(modal.color):null};
+      ne[modal.dk]=[...(ne[modal.dk]||[]),event];
+      setEvts(ne);setModal(null);return;
+    }
     const co=catById(modal.cat),uc=modal.color!==co.color,theme=uc?autoTheme(modal.color):null;
     let ne={...events};
     if(modal.evtId){
@@ -826,6 +1080,9 @@ function App(){
   function toggleDone(dk,id,origin){
     const current=(events[dk]||[]).find(e=>String(e.id)===String(id));
     if(!current) return;
+    if(current.secondaryMissionId&&weekKeyFromDate(new Date(dk+'T12:00:00'))<weekKeyFromDate(today())){
+      window.alert('Esta acción pertenece al historial. Programa el pendiente de la bandeja en la semana actual.');return;
+    }
     const wasDayComplete=(events[dk]||[]).length>0&&(events[dk]||[]).every(e=>e.done);
     const willDone=!current.done;
     const nextEvents={...events,[dk]:(events[dk]||[]).map(e=>String(e.id)===String(id)?{...e,done:willDone}:e)};
@@ -842,7 +1099,7 @@ function App(){
         :current.completionAnimationOverride;
       if(enabled){
         const token=Date.now();
-        setCompletionFx({key:`${dk}:${id}`,token,done:dayDone,total:dayTotal,pct:dayPct});
+        setCompletionFx({key:`${dk}:${id}`,token,done:dayDone,total:dayTotal,pct:dayPct,secondary:!!current.secondaryMissionId});
         setTimeout(()=>setCompletionFx(f=>f&&f.token===token?null:f),1400);
       }
       if(!wasDayComplete&&isDayComplete){
@@ -902,6 +1159,7 @@ function App(){
     dragToken.current+=1;
     setDragEvt(null);setDragOver(null);
     if(result.changed) setEvts(result.events);
+    if(result.error) setPlannerMsg(result.error);
   }
 
   async function enableNotifications(){
@@ -965,7 +1223,7 @@ function App(){
     const widthPct = 100 / maxCols;
     const leftPct = col * widthPct;
     const isDragging=dragEvt?.type==='existing'&&dragEvt.dk===dk&&String(dragEvt.id)===String(ev.id);
-    const fullLabel=baseCat.name+(ev.note?` · ${ev.note}`:'')+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'');
+    const fullLabel=(ev.secondaryMissionId?'◆ '+ev.note:baseCat.name+(ev.note?` · ${ev.note}`:''))+(ev.fixed?' 🔒':'')+(ev.metric==='external'?' 🌐':'')+(ev.repId?' ↻':'')+(ev.notif?' 🔔':'');
     const openEditor=()=>setModal(editorStateForEvent(ev,dk));
     const actions=[
       ['✓',e=>{const r=e.currentTarget.getBoundingClientRect();toggleDone(dk,ev.id,{x:r.left+r.width/2,y:r.top+r.height/2});},ev.done?th.color+'33':'rgba(0,0,0,0.1)','Completar'],
@@ -1161,6 +1419,8 @@ function App(){
           plannerMsg&&React.createElement('div',{style:{fontSize:9,color:'#115e59',lineHeight:1.35,marginTop:6}},plannerMsg)
         ),
 
+        React.createElement('button',{onClick:()=>setShowSecondary(true),style:{...btnBase,width:'100%',background:'#f3e8ff',borderColor:'#d8b4fe',color:'#581c87',padding:'9px 6px',marginBottom:5}},`◆ Misiones secundarias · ${secondaryMissions.filter(activeSecondary).length}`),
+
 
         (()=>{
           const wk=goalWeekKey;
@@ -1197,7 +1457,7 @@ function App(){
         ),
 
         React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'#999',textTransform:'uppercase',letterSpacing:'0.05em'}},'Actividades'),
-        ...cats.map(c=>React.createElement('div',{
+        ...normalCats.map(c=>React.createElement('div',{
           key:c.id,
           draggable:true,
           onDragStart:e=>beginDrag(e,{type:'new',catId:c.id}),
@@ -1222,7 +1482,7 @@ function App(){
         ),
         React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee',marginTop:2}},
           React.createElement(Lbl,{t:'Categoria'}),
-          React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:cats.map(c=>[c.id,c.name])}),
+          React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:normalCats.map(c=>[c.id,c.name])}),
           React.createElement(Lbl,{t:'Fecha'}),
           React.createElement(InpDate,{val:form.date,onChange:v=>setForm(f=>({...f,date:v}))}),
           React.createElement(Lbl,{t:'Nota'}),
@@ -1282,7 +1542,7 @@ function App(){
                   setImportModal(newModal);
               },
               style: { fontSize: 11, padding: '4px', borderRadius: 4, border: '1px solid #ccc', maxWidth: 100 }
-            }, cats.map(c => React.createElement('option', { key: c.id, value: c.id }, c.name)))
+            }, normalCats.map(c => React.createElement('option', { key: c.id, value: c.id }, c.name)))
           ))
         ),
         React.createElement('div',{style:{display:'flex',gap:8}},
@@ -1330,6 +1590,22 @@ function App(){
             !isMobile&&React.createElement('span',{style:{fontSize:10,fontWeight:700,color:'#78350f',textAlign:'right'}},`${week.count}/7`)
           ))
         )
+      ),
+      React.createElement('div',{style:{background:'#faf5ff',border:'1px solid #e9d5ff',borderRadius:10,padding:10,marginBottom:12}},
+        React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#581c87',marginBottom:7}},'◆ Historial de acciones'),
+        goalWeekNavigation(),
+        (()=>{
+          const rows=secondaryMissions.map(m=>({id:m.id,...m.history[goalWeekKey]})).filter(row=>row.status);
+          const done=rows.filter(row=>row.status==='completed').length;
+          return React.createElement(React.Fragment,null,
+            React.createElement('div',{style:{fontSize:11,fontWeight:600,marginBottom:6,color:'#6b21a8'}},`${compactWeekRange(goalWeekDays)} · ${done}/${rows.length} completadas`),
+            !rows.length&&React.createElement('div',{style:{fontSize:10,color:'#777'}},'Sin acciones registradas para esta semana'),
+            ...rows.map(row=>{
+              const status=secondaryHistoryStatus(row.status);
+              return React.createElement('div',{key:row.id,style:{fontSize:11,overflowWrap:'anywhere',marginBottom:4,color:status.color}},`${status.icon} ${row.text} — ${status.label}`);
+            })
+          );
+        })()
       ),
       React.createElement('div',{style:{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6,marginBottom:10}},
         ...[['Actividades',sTotal],['Completadas',sDone],['Cumplimiento',sPct+'%'],['Horas plan.',tH.toFixed(1)+'h'],['Horas comp.',dH.toFixed(1)+'h'],['Pendientes',sTotal-sDone]].map(([l,v])=>
@@ -1398,9 +1674,10 @@ function App(){
       )
     ),
 
-    completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'14%':'18%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.4s ease-out forwards',width:isMobile?'min(82vw,280px)':'300px',padding:'11px 14px',borderRadius:14,background:'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',boxShadow:'0 10px 30px rgba(22,101,52,.3)'}},
+    completionFx&&React.createElement('div',{'aria-live':'polite',style:{position:'fixed',left:'50%',top:isMobile?'14%':'18%',zIndex:12020,pointerEvents:'none',animation:'missionToast 1.4s ease-out forwards',width:isMobile?'min(82vw,280px)':'300px',padding:'11px 14px',borderRadius:14,background:completionFx.secondary?'linear-gradient(135deg,#581c87,#7c3aed,#db2777)':'linear-gradient(135deg,#166534,#22c55e)',color:'#fff',boxShadow:completionFx.secondary?'0 0 35px #c084fc, 0 12px 45px rgba(124,58,237,.5)':'0 10px 30px rgba(22,101,52,.3)'}},
+      completionFx.secondary&&React.createElement('div',{style:{textAlign:'center',fontSize:40,color:'#fde68a',animation:'goalPop .7s ease-out',filter:'drop-shadow(0 0 12px #fbbf24)'}},'◆ ✦'),
       React.createElement('div',{style:{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:10,marginBottom:7}},
-        React.createElement('span',{style:{fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em'}},'Misión cumplida'),
+        React.createElement('span',{style:{fontSize:isMobile?15:18,fontWeight:800,letterSpacing:'.02em'}},completionFx.secondary?'ACCIÓN COMPLETADA':'Misión cumplida'),
         React.createElement('span',{style:{fontSize:12,fontWeight:700,whiteSpace:'nowrap'}},`${completionFx.done}/${completionFx.total} · ${completionFx.pct}%`)
       ),
       React.createElement('div',{style:{height:7,borderRadius:99,overflow:'hidden',background:'rgba(255,255,255,.25)'}},
@@ -1413,11 +1690,40 @@ function App(){
       ...[0,1,2,3,4].map(i=>React.createElement('div',{key:i,style:{position:'fixed',left:`${starFx.startX-18+i*9}px`,top:`${starFx.startY+12+i*5}px`,zIndex:12029,pointerEvents:'none',fontSize:10+i*2,color:'#fde68a',animation:`confettiFall ${.8+i*.12}s ease-out forwards`}},'✦'))
     ),
 
+    showSecondary&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setShowSecondary(false);},style:overlayStyle},
+      React.createElement('div',{style:{...cardStyle,maxWidth:540}},
+        React.createElement('div',{style:{display:'flex',justifyContent:'space-between',gap:8,alignItems:'center',marginBottom:12}},
+          React.createElement('div',{style:{fontSize:17,fontWeight:700,color:'#581c87'}},'◆ Misiones secundarias'),
+          React.createElement('button',{onClick:()=>setShowSecondary(false),style:btnBase,'aria-label':'Cerrar misiones secundarias'},'✕')
+        ),
+        React.createElement('textarea',{'aria-label':'Pega aquí tus pendientes. Una línea = una acción',value:secondaryText,onChange:e=>setSecondaryText(e.target.value),placeholder:'Pega aquí tus pendientes\nUna línea = una acción',style:{...bi,minHeight:130,resize:'vertical',lineHeight:1.5}}),
+        React.createElement('button',{onClick:addSecondaryActions,disabled:!cleanSecondaryText(secondaryText),style:{...btnBase,marginTop:8,background:'#7c3aed',color:'#fff',opacity:cleanSecondaryText(secondaryText)?1:.5}},'Agregar acciones'),
+        secondaryMessage&&React.createElement('div',{'aria-live':'polite',style:{fontSize:12,color:'#6b21a8',marginTop:8,overflowWrap:'anywhere'}},secondaryMessage),
+        React.createElement('div',{style:{fontSize:12,fontWeight:600,margin:'16px 0 8px'}},`${secondaryMissions.filter(m=>m.status==='pending').length} pendientes · ${secondaryMissions.filter(m=>m.status==='scheduled').length} programadas`),
+        ...secondaryMissions.filter(activeSecondary).map(m=>React.createElement('div',{key:m.id,style:{border:'1px solid #e9d5ff',borderRadius:10,padding:10,marginBottom:8,minWidth:0}},
+          secondaryEdit?.id===m.id?React.createElement('div',null,
+            React.createElement(Inp,{val:secondaryEdit.text,onChange:text=>setSecondaryEdit({...secondaryEdit,text})}),
+            React.createElement('button',{onClick:saveSecondaryText,style:{...btnBase,marginTop:6}},'Guardar texto'),
+            React.createElement('button',{onClick:()=>setSecondaryEdit(null),style:{...btnBase,marginLeft:5}},'Cerrar edición')
+          ):React.createElement('div',{style:{fontSize:13,fontWeight:600,overflowWrap:'anywhere'}},m.text),
+          React.createElement('div',{style:{fontSize:10,color:'#777',margin:'4px 0 7px'}},m.status==='scheduled'?`Programada: ${m.scheduledDate}`:`Pendiente · Objetivo: ${compactWeekRange(getWeekDays(new Date(m.targetWeek+'T12:00:00')))}`),
+          React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:5}},
+            React.createElement('button',{onClick:()=>setSecondaryEdit({id:m.id,text:m.text}),style:{...btnBase,fontSize:10,padding:'5px 7px'}},'Editar'),
+            m.status==='pending'&&React.createElement('button',{onClick:()=>scheduleSecondary(m.id),style:{...btnBase,fontSize:10,padding:'5px 7px',color:'#6b21a8'}},'Programar esta semana'),
+            m.status==='pending'&&React.createElement('button',{onClick:()=>chooseSecondaryDate(m.id),style:{...btnBase,fontSize:10,padding:'5px 7px'}},'Elegir fecha y hora'),
+            m.status==='scheduled'&&React.createElement('button',{onClick:()=>{const e=(events[m.scheduledDate]||[]).find(e=>String(e.id)===String(m.linkedEventId));if(e){setShowSecondary(false);setModal(editorStateForEvent(e,m.scheduledDate));}},style:{...btnBase,fontSize:10,padding:'5px 7px'}},'Abrir tarjeta'),
+            React.createElement('button',{onClick:()=>cancelSecondary(m.id),style:{...btnBase,fontSize:10,padding:'5px 7px',color:'#b91c1c'}},'Cancelar misión')
+          )
+        )),
+        !secondaryMissions.some(activeSecondary)&&React.createElement('div',{style:{fontSize:12,color:'#777'}},'No hay acciones pendientes. Las completadas y canceladas siguen en Resumen de progreso.')
+      )
+    ),
+
     modal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setModal(null);},style:overlayStyle},
       React.createElement('div',{style:cardStyle},
         React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
         React.createElement(Lbl,{t:'Categoria'}),
-        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:cats.map(c=>[c.id,c.name])}),
+        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:modal.secondaryMissionId?cats.filter(c=>c.id==='secondary').map(c=>[c.id,c.name]):normalCats.map(c=>[c.id,c.name])}),
         React.createElement(Lbl,{t:'Color'}),
         React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4}},
           React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:modal.color,border:'1px solid #ccc',flexShrink:0}}),
@@ -1426,10 +1732,14 @@ function App(){
         ),
         React.createElement(Lbl,{t:'Nota'}),
         React.createElement(Inp,{val:modal.note,onChange:v=>setModal({...modal,note:v}),ph:'Descripcion...'}),
+        modal.secondaryMissionId&&React.createElement(React.Fragment,null,
+          React.createElement(Lbl,{t:'Fecha'}),
+          React.createElement(InpDate,{val:modal.dk,onChange:dk=>setModal({...modal,dk})})
+        ),
         React.createElement(Lbl,{t:'Hora'}),
         React.createElement(Sel,{val:`${modal.h}_${modal.half?1:0}`,onChange:v=>{const[h,hf]=v.split('_');setModal({...modal,h:parseInt(h),half:hf==='1'});},opts:SLOTS.map(s=>[`${s.h}_${s.half?1:0}`,fmtH(s.h,s.half)])}),
         React.createElement(Lbl,{t:'Duracion'}),
-        React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
+        React.createElement(Sel,{val:modal.dur,onChange:v=>setModal({...modal,dur:parseInt(v)}),opts:modal.secondaryMissionId?[[2,'1 hora']]:[[1,'30 min'],[2,'1 hora'],[3,'1.5h'],[4,'2 horas'],[6,'3 horas'],[8,'4 horas']]}),
         React.createElement(Lbl,{t:'🔔 Notificarme antes'}),
         React.createElement(Sel,{val:modal.notif||0,onChange:v=>setModal({...modal,notif:parseInt(v)}),opts:[[0,'Sin notificacion'],[5,'5 minutos antes'],[10,'10 minutos antes'],[15,'15 minutos antes'],[30,'30 minutos antes'],[60,'1 hora antes']]}),
         React.createElement(Lbl,{t:'Animación al completar'}),
@@ -1438,7 +1748,7 @@ function App(){
           React.createElement('input',{type:'checkbox',checked:!!modal.fixed,onChange:e=>setModal({...modal,fixed:e.target.checked})}),
           React.createElement('span',null,'🔒 Fijar actividad (no mover con arrastre ni reorganizacion)')
         ),
-        !modal.evtId&&React.createElement(React.Fragment,null,
+        !modal.evtId&&!modal.secondaryMissionId&&React.createElement(React.Fragment,null,
           React.createElement(Lbl,{t:'Repeticion'}),
           React.createElement(Sel,{val:modal.rep,onChange:v=>setModal({...modal,rep:v}),opts:[['none','Sin repeticion'],['daily','Todos los dias'],['weekdays','Dias laborales'],['weekend','Fines de semana'],['custom','Dias especificos...']]}),
           modal.rep==='custom'&&React.createElement(RepGrid,{days:modal.repDays,toggle:i=>setModal({...modal,repDays:modal.repDays.map((v,j)=>j===i?!v:v)})})
@@ -1457,7 +1767,7 @@ function App(){
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
         ),
         
-        React.createElement('button',{
+        !modal.secondaryMissionId&&React.createElement('button',{
           onClick:()=>{
             if(window.confirm(`¿Estás seguro de que deseas eliminar la categoría "${catById(modal.cat).name}"?`)){
               deleteCat(modal.cat);
