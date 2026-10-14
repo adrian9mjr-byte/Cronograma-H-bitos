@@ -94,12 +94,28 @@ function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
 function cleanSecondaryText(text){return String(text||'').trim().replace(/^(?:[-•*–—]\s*)+/,'').replace(/\s+/g,' ').trim();}
 function normalizeSecondaryText(text){return cleanSecondaryText(text).toLocaleLowerCase('es');}
 function activeSecondary(m){return m.status==='pending'||m.status==='scheduled';}
+function secondaryTargetWeek(m){
+  const created=new Date(m.createdAt);
+  return m.targetWeek||m.scheduledWeek||weekKeyFromDate(addDays(Number.isNaN(created.getTime())?today():created,7));
+}
+function retargetSecondaryMission(m,week,now=new Date()){
+  const currentWeek=weekKeyFromDate(now);
+  const history=Object.fromEntries(Object.entries(m.history||{}).filter(([wk,row])=>wk<currentWeek||['completed','cancelled','unfulfilled'].includes(row.status)));
+  history[week]={...(history[week]||{}),text:m.text,status:'pending'};
+  return {...m,targetWeek:week,history};
+}
+function secondaryEligibleForWeek(m,week){return m.status==='pending'&&secondaryTargetWeek(m)<=week;}
 function parseSecondaryMissions(value){
   try{
     const rows=typeof value==='string'?JSON.parse(value):value;
     if(!Array.isArray(rows)) return [];
     return rows.filter(m=>m&&typeof m.id==='string'&&cleanSecondaryText(m.text)&&['pending','scheduled','completed','cancelled'].includes(m.status))
-      .map(m=>({...m,text:cleanSecondaryText(m.text),normalizedText:normalizeSecondaryText(m.text),weeksCarried:Number.isFinite(m.weeksCarried)?m.weeksCarried:0,history:m.history&&typeof m.history==='object'&&!Array.isArray(m.history)?m.history:{}}));
+      .map(m=>{
+        const {carryWeek,...fields}=m;
+        const targetWeek=secondaryTargetWeek(m);
+        const history=m.history&&typeof m.history==='object'&&!Array.isArray(m.history)?m.history:{};
+        return {...fields,text:cleanSecondaryText(m.text),normalizedText:normalizeSecondaryText(m.text),targetWeek,weeksCarried:Number.isFinite(m.weeksCarried)?m.weeksCarried:0,history:Object.fromEntries(Object.entries(history).filter(([wk,row])=>m.targetWeek||wk>=targetWeek||['completed','cancelled','unfulfilled'].includes(row?.status)))};
+      });
   }catch(e){return [];}
 }
 function addSecondaryLines(missions,text,now=new Date(),newId=()=> 'secondary_'+Date.now()+'_'+Math.random()){
@@ -110,8 +126,8 @@ function addSecondaryLines(missions,text,now=new Date(),newId=()=> 'secondary_'+
     if(!text) return;
     if(seen.has(normalizedText)){duplicates++;return;}
     seen.add(normalizedText);added++;
-    const week=weekKeyFromDate(now);
-    next.push({id:newId(),text,normalizedText,createdAt:now.toISOString(),status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,completedAt:null,cancelledAt:null,weeksCarried:0,carryWeek:week,history:{[week]:{text,status:'pending'}}});
+    const targetWeek=weekKeyFromDate(addDays(now,7));
+    next.push({id:newId(),text,normalizedText,createdAt:now.toISOString(),status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,completedAt:null,cancelledAt:null,weeksCarried:0,targetWeek,history:{[targetWeek]:{text,status:'pending'}}});
   });
   return {missions:next,added,duplicates};
 }
@@ -120,14 +136,15 @@ function rolloverSecondaryMissions(missions,now=new Date()){
   return missions.map(original=>{
     if(!activeSecondary(original)) return original;
     let m={...original,history:{...original.history}};
-    let week=m.carryWeek||m.scheduledWeek||weekKeyFromDate(new Date(m.createdAt));
+    let week=secondaryTargetWeek(m);
+    if(week>currentWeek) return {...m,targetWeek:week};
     while(week<currentWeek){
       m.history[week]={...(m.history[week]||{}),text:m.history[week]?.text||m.text,status:'unfulfilled'};
       week=weekKeyFromDate(addDays(new Date(week+'T12:00:00'),7));
       m.weeksCarried=(m.weeksCarried||0)+1;
       if(!m.history[week]) m.history[week]={text:m.text,status:'pending'};
     }
-    m.carryWeek=week;
+    m.targetWeek=week;
     if(m.scheduledWeek&&m.scheduledWeek<currentWeek){
       m.status='pending';m.scheduledWeek=null;m.scheduledDate=null;m.linkedEventId=null;
     }
@@ -149,12 +166,9 @@ function reconcileSecondaryMissions(missions,events,now=new Date()){
     }
     const {dk,e}=linked,week=weekKeyFromDate(new Date(dk+'T12:00:00'));
     const completedAt=e.done?(original.completedAt||now.toISOString()):null;
-    const history={...original.history};
-    if(original.scheduledWeek&&original.scheduledWeek!==week&&original.scheduledWeek>=currentWeek){
-      history[original.scheduledWeek]={...history[original.scheduledWeek],status:'pending'};
-    }
+    const history=week===secondaryTargetWeek(original)?{...original.history}:retargetSecondaryMission(original,week,now).history;
     history[week]={text:e.note||original.text,status:e.done?'completed':'scheduled',date:dk,h:e.h,half:!!e.half,eventId:e.id,completedAt};
-    return {...original,text:e.note||original.text,normalizedText:normalizeSecondaryText(e.note||original.text),status:e.done?'completed':'scheduled',scheduledWeek:week,scheduledDate:dk,linkedEventId:e.id,completedAt,history};
+    return {...original,targetWeek:week,text:e.note||original.text,normalizedText:normalizeSecondaryText(e.note||original.text),status:e.done?'completed':'scheduled',scheduledWeek:week,scheduledDate:dk,linkedEventId:e.id,completedAt,history};
   });
 }
 function pickSecondarySlot(events,week,now=new Date(),random=Math.random){
@@ -247,6 +261,7 @@ function eventsAfterDrop(events,payload,targetDk,h,half,newId=Date.now()){
   if(!payload) return{events,changed:false};
   const next=cloneEventsMap(events);
   if(payload.type==='new'){
+    if(payload.catId==='secondary') return {events,changed:false,error:'Crea esta acción desde Misiones secundarias.'};
     if(!next[targetDk]) next[targetDk]=[];
     next[targetDk]=[...next[targetDk],{id:newId,cat:payload.catId,note:'',h,half,dur:2,done:false,notif:0}];
     return{events:next,changed:true};
@@ -683,6 +698,7 @@ function App(){
   }
 
   const catById=id=>cats.find(c=>c.id===id)||cats[0];
+  const normalCats=cats.filter(c=>c.id!=='secondary');
   function editorStateForEvent(ev,dk,extra={}){
     const baseCat=catById(ev.cat);
     return{dk,evtId:String(ev.id),secondaryMissionId:ev.secondaryMissionId,cat:ev.cat,note:ev.note||'',h:ev.h,half:ev.half||false,dur:ev.dur,color:ev.customColor||baseCat.color,rep:'none',repDays:[false,false,false,false,false,false,false],notif:ev.notif||0,fixed:!!ev.fixed,completionAnimationOverride:ev.completionAnimationOverride??null,...extra};
@@ -846,7 +862,7 @@ function App(){
       }
     });
     const missions=rolloverSecondaryMissions(secondaryRef.current);
-    missions.filter(m=>m.status==='pending').forEach(m=>{
+    missions.filter(m=>secondaryEligibleForWeek(m,weekKeyFromDate(weekDays[0]))).forEach(m=>{
       if(Object.entries(ne).some(([dk,rows])=>weekKeyFromDate(new Date(dk+'T12:00:00'))>=weekKeyFromDate(today())&&rows.some(e=>e.secondaryMissionId===m.id))) return;
       const slot=pickSecondarySlot(ne,weekDays);
       if(!slot){unscheduled.push(m.text);return;}
@@ -939,7 +955,7 @@ function App(){
       // Usamos propagación (...) para conservar las actividades manuales que ya tenías
       ne[dk] = [...ne[dk], {
         id: Date.now() + '_' + Math.random(),
-        cat: ev.cat,
+        cat: ev.cat==='secondary'?normalCats[0].id:ev.cat,
         note: ev.summary,
         h, half, dur, done: false, notif: 0, fixed: true, source: 'calendar-import'
       }];
@@ -972,6 +988,7 @@ function App(){
   }
 
   function addRepEvts(base,cat,note,h,half,dur,repType,cd,startDate,notif,fixed=false,completionAnimationOverride=null){
+    if(cat==='secondary') return base;
     const rd=getRepDays(repType,cd);
     if(!rd.length) return base;
     const out={...base};
@@ -990,6 +1007,7 @@ function App(){
   }
 
   function addFromForm(){
+    if(form.cat==='secondary') return;
     const[h,hf]=form.hour.split('_');
     const half=hf==='1',hi=parseInt(h);
     const dk=form.date;
@@ -1009,6 +1027,7 @@ function App(){
 
   function saveModal(){
     if(!modal) return;
+    if(modal.cat==='secondary'&&!modal.secondaryMissionId) return;
     if(modal.secondaryMissionId){
       const mission=secondaryRef.current.find(m=>m.id===modal.secondaryMissionId);
       const text=cleanSecondaryText(modal.note),normalizedText=normalizeSecondaryText(text);
@@ -1429,7 +1448,7 @@ function App(){
         ),
 
         React.createElement('div',{style:{fontSize:10,fontWeight:600,color:'#999',textTransform:'uppercase',letterSpacing:'0.05em'}},'Actividades'),
-        ...cats.map(c=>React.createElement('div',{
+        ...normalCats.map(c=>React.createElement('div',{
           key:c.id,
           draggable:true,
           onDragStart:e=>beginDrag(e,{type:'new',catId:c.id}),
@@ -1454,7 +1473,7 @@ function App(){
         ),
         React.createElement('div',{style:{background:'#f9f9f9',borderRadius:8,padding:10,border:'1px solid #eee',marginTop:2}},
           React.createElement(Lbl,{t:'Categoria'}),
-          React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:cats.map(c=>[c.id,c.name])}),
+          React.createElement(Sel,{val:form.cat,onChange:v=>setForm(f=>({...f,cat:v})),opts:normalCats.map(c=>[c.id,c.name])}),
           React.createElement(Lbl,{t:'Fecha'}),
           React.createElement(InpDate,{val:form.date,onChange:v=>setForm(f=>({...f,date:v}))}),
           React.createElement(Lbl,{t:'Nota'}),
@@ -1514,7 +1533,7 @@ function App(){
                   setImportModal(newModal);
               },
               style: { fontSize: 11, padding: '4px', borderRadius: 4, border: '1px solid #ccc', maxWidth: 100 }
-            }, cats.map(c => React.createElement('option', { key: c.id, value: c.id }, c.name)))
+            }, normalCats.map(c => React.createElement('option', { key: c.id, value: c.id }, c.name)))
           ))
         ),
         React.createElement('div',{style:{display:'flex',gap:8}},
@@ -1675,7 +1694,7 @@ function App(){
             React.createElement('button',{onClick:saveSecondaryText,style:{...btnBase,marginTop:6}},'Guardar texto'),
             React.createElement('button',{onClick:()=>setSecondaryEdit(null),style:{...btnBase,marginLeft:5}},'Cerrar edición')
           ):React.createElement('div',{style:{fontSize:13,fontWeight:600,overflowWrap:'anywhere'}},m.text),
-          React.createElement('div',{style:{fontSize:10,color:'#777',margin:'4px 0 7px'}},m.status==='scheduled'?`Programada: ${m.scheduledDate}`:'Pendiente'),
+          React.createElement('div',{style:{fontSize:10,color:'#777',margin:'4px 0 7px'}},m.status==='scheduled'?`Programada: ${m.scheduledDate}`:`Pendiente · Objetivo: ${compactWeekRange(getWeekDays(new Date(m.targetWeek+'T12:00:00')))}`),
           React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:5}},
             React.createElement('button',{onClick:()=>setSecondaryEdit({id:m.id,text:m.text}),style:{...btnBase,fontSize:10,padding:'5px 7px'}},'Editar'),
             m.status==='pending'&&React.createElement('button',{onClick:()=>scheduleSecondary(m.id),style:{...btnBase,fontSize:10,padding:'5px 7px',color:'#6b21a8'}},'Programar esta semana'),
@@ -1692,7 +1711,7 @@ function App(){
       React.createElement('div',{style:cardStyle},
         React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
         React.createElement(Lbl,{t:'Categoria'}),
-        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:modal.secondaryMissionId?cats.filter(c=>c.id==='secondary').map(c=>[c.id,c.name]):cats.map(c=>[c.id,c.name])}),
+        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:modal.secondaryMissionId?cats.filter(c=>c.id==='secondary').map(c=>[c.id,c.name]):normalCats.map(c=>[c.id,c.name])}),
         React.createElement(Lbl,{t:'Color'}),
         React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4}},
           React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:modal.color,border:'1px solid #ccc',flexShrink:0}}),

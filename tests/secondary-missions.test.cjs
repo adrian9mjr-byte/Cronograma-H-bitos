@@ -133,3 +133,76 @@ test('persistence propagates query and write errors instead of reporting false s
   database.from=()=>({select(){return this},eq(){return this},maybeSingle:async()=>({data:null,error:null}),insert:async()=>({error:new Error('write failed')})});
   await assert.rejects(call('saveToDB','secondaryMissions',[]),/write failed/);
 });
+
+test('capture defaults to next week and never records a missed capture week',()=>{
+  const captured=new Clock('2026-10-14T12:00:00');
+  const m=add([],'Lavar moto',captured).missions[0];
+  assert.equal(m.targetWeek,'2026-10-19');assert.equal(m.weeksCarried,0);
+  assert.equal(m.history['2026-10-12'],undefined);
+  const unchanged=call('rolloverSecondaryMissions',[m],captured)[0];
+  assert.equal(unchanged.targetWeek,'2026-10-19');assert.equal(unchanged.weeksCarried,0);
+  const targetStarted=call('rolloverSecondaryMissions',[m],new Clock('2026-10-19T12:00:00'))[0];
+  assert.equal(targetStarted.weeksCarried,0);assert.equal(targetStarted.history['2026-10-12'],undefined);
+});
+test('first true rollover is after target week and remains idempotent',()=>{
+  const m=add([],'Lavar moto',new Clock('2026-10-14T12:00:00')).missions[0];
+  const rows=call('rolloverSecondaryMissions',[m],new Clock('2026-10-26T12:00:00'));
+  assert.equal(rows[0].targetWeek,'2026-10-26');assert.equal(rows[0].weeksCarried,1);
+  assert.equal(rows[0].history['2026-10-19'].status,'unfulfilled');
+  assert.equal(rows[0].history['2026-10-12'],undefined);
+  const repeated=call('rolloverSecondaryMissions',rows,new Clock('2026-10-29T12:00:00'));
+  assert.equal(repeated[0].weeksCarried,1);
+});
+test('program this week changes target only when a linked event is inserted',()=>{
+  const captured=new Clock('2026-10-14T12:00:00'),m=add([],'Lavar moto',captured).missions[0];
+  const event=call('secondaryEvent',m,'2026-10-15',600,'now');
+  const changed=call('reconcileSecondaryMissions',[m],{'2026-10-15':[event]},captured)[0];
+  assert.equal(changed.targetWeek,'2026-10-12');assert.equal(changed.status,'scheduled');
+  assert.equal(changed.history['2026-10-12'].status,'scheduled');
+  assert.equal(changed.history['2026-10-19'],undefined);
+  assert.equal(call('rolloverSecondaryMissions',[changed],new Clock('2026-10-19T12:00:00'))[0].weeksCarried,1);
+  assert.equal(call('reconcileSecondaryMissions',[m],{},captured)[0].targetWeek,'2026-10-19');
+});
+test('manual future date targets its own week without capture-week history',()=>{
+  const captured=new Clock('2026-10-14T12:00:00'),m=add([],'Action',captured).missions[0];
+  for(const dk of ['2026-10-22','2026-10-29']){
+    const event=call('secondaryEvent',m,dk,600,dk);
+    const scheduled=call('reconcileSecondaryMissions',[m],{[dk]:[event]},captured)[0];
+    assert.equal(scheduled.targetWeek,call('weekKeyFromDate',new Clock(dk+'T12:00:00')));
+    assert.equal(Object.keys(scheduled.history).length,1);
+    assert.equal(scheduled.history['2026-10-12'],undefined);assert.equal(scheduled.weeksCarried,0);
+  }
+});
+test('closed app rolls all missed target weeks and completion preserves their results',()=>{
+  const m=add([],'Coser ropa',new Clock('2026-10-14T12:00:00')).missions[0];
+  const reopened=new Clock('2026-11-02T12:00:00');
+  const rows=call('rolloverSecondaryMissions',[m],reopened);
+  assert.equal(rows[0].weeksCarried,2);assert.equal(rows[0].targetWeek,'2026-11-02');
+  assert.equal(rows[0].history['2026-10-12'],undefined);
+  assert.equal(rows[0].history['2026-10-19'].status,'unfulfilled');
+  assert.equal(rows[0].history['2026-10-26'].status,'unfulfilled');
+  assert.equal(call('rolloverSecondaryMissions',rows,reopened)[0].weeksCarried,2);
+  const event={...call('secondaryEvent',m,'2026-11-03',600,'done'),done:true};
+  const completed=call('reconcileSecondaryMissions',rows,{'2026-11-03':[event]},reopened)[0];
+  assert.equal(completed.history['2026-11-02'].status,'completed');
+  assert.equal(completed.history['2026-10-19'].status,'unfulfilled');
+  assert.equal(completed.history['2026-10-26'].status,'unfulfilled');
+});
+test('organizer eligibility excludes future targets and includes outstanding earlier targets',()=>{
+  const m=add([],'Action',new Clock('2026-10-14T12:00:00')).missions[0];
+  assert.equal(call('secondaryEligibleForWeek',m,'2026-10-12'),false);
+  assert.equal(call('secondaryEligibleForWeek',m,'2026-10-19'),true);
+  assert.equal(call('secondaryEligibleForWeek',m,'2026-10-26'),true);
+  assert.equal(call('secondaryEligibleForWeek',{...m,status:'scheduled'},'2026-10-19'),false);
+});
+test('initial PR records migrate targets safely and generic drops cannot create orphans',()=>{
+  const m=add([],'Action',new Clock('2026-10-14T12:00:00')).missions[0];
+  const {targetWeek,...legacy}=m;
+  legacy.carryWeek='2026-10-12';legacy.history={'2026-10-12':{text:m.text,status:'pending'}};
+  const parsed=call('parseSecondaryMissions',[legacy])[0];
+  assert.equal(parsed.targetWeek,'2026-10-19');assert.equal(parsed.carryWeek,undefined);
+  assert.equal(parsed.history['2026-10-12'],undefined);
+  assert.equal(call('parseSecondaryMissions',[{...legacy,status:'scheduled',scheduledWeek:'2026-10-12'}])[0].targetWeek,'2026-10-12');
+  const events={};const drop=call('eventsAfterDrop',events,{type:'new',catId:'secondary'},'2026-10-14',10,false);
+  assert.equal(drop.changed,false);assert.equal(drop.events,events);
+});
