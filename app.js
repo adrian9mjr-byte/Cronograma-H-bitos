@@ -204,6 +204,21 @@ function pickSecondarySlot(events,week,now=new Date(),random=Math.random){
 function secondaryEvent(mission,dk,m,newId='secondary_event_'+Date.now()+'_'+Math.random()){
   return {id:newId,secondaryMissionId:mission.id,cat:'secondary',note:mission.text,...minutesToSlot(m),dur:2,done:false,notif:0,fixed:false,completionAnimationOverride:null};
 }
+function scheduleSecondaryBatch(missions,events,ids,now=new Date(),random=Math.random){
+  const ne=cloneEventsMap(events),selected=new Set(ids),scheduled=[],failed=[];
+  const next=rolloverSecondaryMissions(missions,now),week=getWeekDays(now);
+  next.filter(m=>selected.has(m.id)&&m.status==='pending').forEach(m=>{
+    if(Object.entries(ne).some(([dk,rows])=>weekKeyFromDate(new Date(dk+'T12:00:00'))>=weekKeyFromDate(now)&&rows.some(e=>e.secondaryMissionId===m.id))) return;
+    const slot=pickSecondarySlot(ne,week,now,random);
+    if(!slot){failed.push(m);return;}
+    ne[slot.dk]=[...(ne[slot.dk]||[]),secondaryEvent(m,slot.dk,slot.m)];
+    scheduled.push(m.id);
+  });
+  return {events:ne,missions:reconcileSecondaryMissions(next,ne,now),scheduled,failed};
+}
+function plannerFailure(type,label){
+  return {type,label,reason:type==='secondary'?'No queda un bloque futuro libre de 1 hora esta semana.':'No queda un bloque compatible con sus días, horario y conflictos actuales.'};
+}
 
 function completedDaysForWeek(events,date){
   return getWeekDays(date).map(dateKey).filter(dk=>{
@@ -489,6 +504,7 @@ function App(){
   const [showCatColors,setShowCatColors]=useState(false);
   const [showRepMgr,setShowRepMgr]=useState(false);
   const [plannerMsg,setPlannerMsg]=useState('');
+  const [plannerFailures,setPlannerFailures]=useState([]);
   const [isMobile,setIsMobile]=useState(()=>window.innerWidth<=700);
   const [showMobileTools,setShowMobileTools]=useState(false);
   const [goalTargets,setGoalTargets]=useState({...DEFAULT_GOAL_TARGETS});
@@ -501,6 +517,8 @@ function App(){
   const secondaryRef=useRef([]);
   const secondarySaveQueue=useRef(Promise.resolve());
   const [showSecondary,setShowSecondary]=useState(false);
+  const [secondarySelection,setSecondarySelection]=useState([]);
+  const [secondaryBatchFailures,setSecondaryBatchFailures]=useState([]);
   const [secondaryText,setSecondaryText]=useState('');
   const [secondaryMessage,setSecondaryMessage]=useState('');
   const [secondaryEdit,setSecondaryEdit]=useState(null);
@@ -754,6 +772,13 @@ function App(){
     persistSecondary(reconcileSecondaryMissions(next,ne),ne);setEvts(ne);
     setSecondaryMessage(`◆ ${mission.text}: ${slot.dk} ${fmtH(event.h,event.half)}`);
   }
+  function scheduleSelectedSecondary(){
+    const result=scheduleSecondaryBatch(secondaryRef.current,events,secondarySelection);
+    persistSecondary(result.missions,result.events);setEvts(result.events);
+    setSecondarySelection(result.failed.map(m=>m.id));
+    setSecondaryBatchFailures(result.failed);
+    setSecondaryMessage(`${result.scheduled.length} acciones programadas · ${result.failed.length} sin espacio`);
+  }
   function chooseSecondaryDate(id){
     const mission=secondaryRef.current.find(m=>m.id===id);
     if(!mission||mission.status!=='pending') return;
@@ -860,7 +885,7 @@ function App(){
       const need=Math.max(0,plannerCountForTemplate(tpl)-existing);
       for(let i=0;i<need;i++){
         const slot=findBestPlannerSlot(ne,weekDays,tpl);
-        if(!slot){unscheduled.push(tpl.note);continue;}
+        if(!slot){unscheduled.push(plannerFailure('planner',tpl.note));continue;}
         const sh=minutesToSlot(slot.m);
         if(!ne[slot.dk]) ne[slot.dk]=[];
         ne[slot.dk]=[...ne[slot.dk],{
@@ -874,7 +899,7 @@ function App(){
     missions.filter(m=>secondaryEligibleForWeek(m,weekKeyFromDate(weekDays[0]))).forEach(m=>{
       if(Object.entries(ne).some(([dk,rows])=>weekKeyFromDate(new Date(dk+'T12:00:00'))>=weekKeyFromDate(today())&&rows.some(e=>e.secondaryMissionId===m.id))) return;
       const slot=pickSecondarySlot(ne,weekDays);
-      if(!slot){unscheduled.push(m.text);return;}
+      if(!slot){unscheduled.push(plannerFailure('secondary',m.text));return;}
       ne[slot.dk]=[...(ne[slot.dk]||[]),secondaryEvent(m,slot.dk,slot.m)];
     });
     persistSecondary(reconcileSecondaryMissions(missions,ne),ne);
@@ -882,9 +907,10 @@ function App(){
     setView('week');
     setCursor(weekDays[0]);
     const start=weekDays[0],end=weekDays[6];
+    setPlannerFailures(unscheduled);
     setPlannerMsg(unscheduled.length
       ?`Semana ${start.getDate()}-${end.getDate()}: organizada, pero quedaron ${unscheduled.length} actividad(es) sin espacio.`
-      :`Semana ${start.getDate()}-${end.getDate()}: plan listo. Fijas protegidas y flexibles distribuidas.`);
+      :'Semana lista. Todas las actividades encontraron espacio.');
   }
 
 
@@ -1356,6 +1382,8 @@ function App(){
     React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}}')
   );
 
+  const pendingSecondaryIds=secondaryMissions.filter(m=>m.status==='pending').map(m=>m.id);
+  const selectedSecondaryIds=secondarySelection.filter(id=>pendingSecondaryIds.includes(id));
   return React.createElement('div',{style:{padding:isMobile?'8px':'12px',fontFamily:'system-ui',minHeight:'100vh',background:'#f5f5f3',maxWidth:isMobile?'100%':900,margin:'0 auto',overflowX:'hidden'}},
     React.createElement('style',null,'@keyframes spin{to{transform:rotate(360deg)}} @keyframes goalPop{0%{transform:scale(.75);opacity:0}55%{transform:scale(1.08);opacity:1}100%{transform:scale(1);opacity:1}} @keyframes confettiFall{0%{transform:translateY(-30px) rotate(0deg);opacity:0}15%{opacity:1}100%{transform:translateY(180px) rotate(360deg);opacity:0}} @keyframes missionComplete{0%{transform:translateX(0)}15%{transform:translateX(-3px)}30%{transform:translateX(3px)}45%{transform:translateX(-2px)}60%{transform:translateX(2px)}100%{transform:translateX(0)}} @keyframes missionToast{0%{opacity:0;transform:translate(-50%,10px) scale(.85)}20%,78%{opacity:1;transform:translate(-50%,0) scale(1)}100%{opacity:0;transform:translate(-50%,-12px) scale(.96)}} @keyframes missionProgress{from{transform:scaleX(0)}to{transform:scaleX(1)}} @keyframes starFlight{0%{opacity:0;transform:translate(-50%,-50%) scale(.4) rotate(-20deg)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.5) rotate(8deg)}55%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(0)}100%{opacity:0;left:var(--star-target-x);top:var(--star-target-y);transform:translate(-50%,-50%) scale(.35) rotate(360deg)}} *{box-sizing:border-box}'),
 
@@ -1416,7 +1444,14 @@ function App(){
           React.createElement('div',{style:{fontSize:9,color:'#134e4a',lineHeight:1.35,marginBottom:7}},'Las metas semanales se gestionan en el panel de abajo. Cumplir tarjetas mueve el sistema; cumplir metas confirma el resultado.'),
           React.createElement('button',{onClick:()=>organizePlannerWeek(false),style:{...btnBase,width:'100%',fontSize:11,padding:'7px 6px',background:'#0f766e',color:'#fff',border:'none',marginBottom:5}},'🎲 Organizar semana'),
           React.createElement('button',{onClick:()=>{if(window.confirm('¿Reorganizar las actividades flexibles de esta semana? Las fijas y las ya completadas no se moveran.'))organizePlannerWeek(true);},style:{...btnBase,width:'100%',fontSize:10,padding:'5px 6px',background:'#fff',color:'#0f766e',border:'1px solid #5eead4'}},'↻ Reorganizar flexibles'),
-          plannerMsg&&React.createElement('div',{style:{fontSize:9,color:'#115e59',lineHeight:1.35,marginTop:6}},plannerMsg)
+          plannerMsg&&React.createElement('div',{'aria-live':'polite',style:{fontSize:9,color:'#115e59',lineHeight:1.35,marginTop:6}},plannerMsg),
+          plannerFailures.length>0&&React.createElement('div',{style:{fontSize:11,marginTop:8,overflowWrap:'anywhere'}},
+            React.createElement('div',{style:{fontWeight:600}},`⚠ ${plannerFailures.length} actividades no pudieron programarse:`),
+            ...plannerFailures.map((item,i)=>React.createElement('div',{key:i,style:{marginTop:7}},
+              React.createElement('div',{style:{fontWeight:600}},`• ${item.label}`),
+              React.createElement('div',{style:{fontSize:10,color:'#555'}},`${item.type==='secondary'?'Misión secundaria':'Actividad del planner'} · ${item.reason}`)
+            ))
+          )
         ),
 
         React.createElement('button',{onClick:()=>setShowSecondary(true),style:{...btnBase,width:'100%',background:'#f3e8ff',borderColor:'#d8b4fe',color:'#581c87',padding:'9px 6px',marginBottom:5}},`◆ Misiones secundarias · ${secondaryMissions.filter(activeSecondary).length}`),
@@ -1699,8 +1734,22 @@ function App(){
         React.createElement('textarea',{'aria-label':'Pega aquí tus pendientes. Una línea = una acción',value:secondaryText,onChange:e=>setSecondaryText(e.target.value),placeholder:'Pega aquí tus pendientes\nUna línea = una acción',style:{...bi,minHeight:130,resize:'vertical',lineHeight:1.5}}),
         React.createElement('button',{onClick:addSecondaryActions,disabled:!cleanSecondaryText(secondaryText),style:{...btnBase,marginTop:8,background:'#7c3aed',color:'#fff',opacity:cleanSecondaryText(secondaryText)?1:.5}},'Agregar acciones'),
         secondaryMessage&&React.createElement('div',{'aria-live':'polite',style:{fontSize:12,color:'#6b21a8',marginTop:8,overflowWrap:'anywhere'}},secondaryMessage),
+        secondaryBatchFailures.length>0&&React.createElement('div',{style:{fontSize:12,marginTop:6,overflowWrap:'anywhere'}},
+          React.createElement('div',null,'Sin espacio:'),
+          ...secondaryBatchFailures.map(m=>React.createElement('div',{key:m.id},`• ${m.text}`))
+        ),
         React.createElement('div',{style:{fontSize:12,fontWeight:600,margin:'16px 0 8px'}},`${secondaryMissions.filter(m=>m.status==='pending').length} pendientes · ${secondaryMissions.filter(m=>m.status==='scheduled').length} programadas`),
+        React.createElement('div',{style:{display:'flex',flexWrap:'wrap',alignItems:'center',gap:8,marginBottom:8}},
+          React.createElement('button',{onClick:()=>setSecondarySelection(pendingSecondaryIds),disabled:!pendingSecondaryIds.length,style:{...btnBase,fontSize:12}},'Seleccionar todas'),
+          selectedSecondaryIds.length>0&&React.createElement('button',{onClick:()=>setSecondarySelection([]),style:{...btnBase,fontSize:12}},'Quitar selección'),
+          React.createElement('span',{'aria-live':'polite',style:{fontSize:12}},`${selectedSecondaryIds.length} seleccionadas`)
+        ),
+        React.createElement('button',{onClick:scheduleSelectedSecondary,disabled:!selectedSecondaryIds.length,style:{...btnBase,width:'100%',whiteSpace:'normal',marginBottom:12,background:selectedSecondaryIds.length?'#7c3aed':'#e5e7eb',color:selectedSecondaryIds.length?'#fff':'#6b7280',cursor:selectedSecondaryIds.length?'pointer':'not-allowed'}},`Programar seleccionadas esta semana (${selectedSecondaryIds.length})`),
         ...secondaryMissions.filter(activeSecondary).map(m=>React.createElement('div',{key:m.id,style:{border:'1px solid #e9d5ff',borderRadius:10,padding:10,marginBottom:8,minWidth:0}},
+          m.status==='pending'&&React.createElement('label',{style:{display:'flex',alignItems:'center',gap:8,fontSize:12,marginBottom:6,cursor:'pointer'}},
+            React.createElement('input',{type:'checkbox','aria-label':`Seleccionar ${m.text}`,checked:selectedSecondaryIds.includes(m.id),onChange:e=>setSecondarySelection(e.target.checked?[...selectedSecondaryIds,m.id]:selectedSecondaryIds.filter(id=>id!==m.id))}),
+            'Seleccionar'
+          ),
           secondaryEdit?.id===m.id?React.createElement('div',null,
             React.createElement(Inp,{val:secondaryEdit.text,onChange:text=>setSecondaryEdit({...secondaryEdit,text})}),
             React.createElement('button',{onClick:saveSecondaryText,style:{...btnBase,marginTop:6}},'Guardar texto'),

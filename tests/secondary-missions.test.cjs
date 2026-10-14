@@ -12,6 +12,91 @@ const now=new Clock(),firstWeek=new Clock('2026-10-05T08:00:00');
 let serial=0;
 const add=(missions,text,date=now)=>call('addSecondaryLines',missions,text,date,()=>`mission_${++serial}`);
 
+test('batch schedules five pending missions on updated days without overlaps or duplicates',()=>{
+  const missions=add([],'A\nB\nC\nD\nE').missions,events={};
+  const result=call('scheduleSecondaryBatch',missions,events,missions.map(m=>m.id),now,()=>0);
+  assert.equal(result.scheduled.length,5);assert.equal(result.failed.length,0);
+  assert.equal(Object.keys(events).length,0);
+  const rows=Object.entries(result.events);
+  assert.equal(rows.length,5);
+  assert.equal(new Set(rows.flatMap(([,es])=>es.map(e=>e.secondaryMissionId))).size,5);
+  result.missions.forEach(m=>{
+    assert.equal(m.status,'scheduled');assert.equal(m.targetWeek,'2026-10-12');
+    assert.equal(m.history['2026-10-12'].status,'scheduled');assert.equal(m.history['2026-10-19'],undefined);
+  });
+  const repeated=call('scheduleSecondaryBatch',result.missions,result.events,missions.map(m=>m.id),now,()=>0);
+  assert.equal(repeated.scheduled.length,0);
+  assert.equal(Object.values(repeated.events).flat().length,5);
+});
+
+function fullWeekExcept(holes){
+  const events={};
+  for(const d of call('getWeekDays',now)){
+    const dk=call('dateKey',d);events[dk]=[];
+    for(let m=360;m<1440;m+=30){
+      if((holes[dk]||[]).some(start=>m>=start&&m<start+60)) continue;
+      events[dk].push({id:`busy_${dk}_${m}`,h:Math.floor(m/60),half:m%60===30,dur:1});
+    }
+  }
+  return events;
+}
+
+test('batch repeats a day with three free hours between secondary missions',()=>{
+  const missions=add([],'A\nB').missions;
+  const events=fullWeekExcept({'2026-10-14':[480,720]});
+  const result=call('scheduleSecondaryBatch',missions,events,missions.map(m=>m.id),now,()=>0);
+  assert.equal(result.scheduled.length,2);
+  const placed=result.events['2026-10-14'].filter(e=>e.secondaryMissionId);
+  assert.equal(call('slotToMinutes',placed[1].h,placed[1].half)-call('eventEndMinutes',placed[0]),180);
+});
+
+test('partial batch retargets only successes, keeps two failures pending and excludes other states',()=>{
+  const missions=add([],'A\nB\nC\nD\nE\nScheduled\nCompleted\nCancelled').missions;
+  ['scheduled','completed','cancelled'].forEach((status,i)=>missions[i+5].status=status);
+  const events=fullWeekExcept({'2026-10-14':[480,720,960]});
+  const result=call('scheduleSecondaryBatch',missions,events,missions.map(m=>m.id),now,()=>0);
+  assert.equal(result.scheduled.length,3);assert.equal(result.failed.length,2);
+  assert.equal(Object.values(result.events).flat().filter(e=>e.secondaryMissionId).length,3);
+  for(const failed of result.failed){
+    const m=result.missions.find(m=>m.id===failed.id);
+    assert.equal(m.status,'pending');assert.equal(m.targetWeek,'2026-10-19');assert.equal(m.linkedEventId,null);
+  }
+  assert.equal(result.missions[6].status,'completed');assert.equal(result.missions[7].status,'cancelled');
+  assert.ok(!result.scheduled.includes(missions[5].id));
+  assert.ok(!result.scheduled.includes(missions[6].id));
+  assert.ok(!result.scheduled.includes(missions[7].id));
+});
+
+test('batch skips already linked pending mission and leaves unselected missions untouched',()=>{
+  const missions=add([],'A\nB').missions;
+  const events={'2026-10-14':[call('secondaryEvent',missions[0],'2026-10-14',480,'existing')]};
+  const result=call('scheduleSecondaryBatch',missions,events,[missions[0].id],now,()=>0);
+  assert.equal(Object.values(result.events).flat().length,1);
+  assert.equal(result.missions[1].targetWeek,'2026-10-19');assert.equal(result.missions[1].status,'pending');
+});
+
+test('organizer reports planner and secondary failures with accurate count and unchanged constraints',()=>{
+  context.__events=fullWeekExcept({});
+  context.__missions=add([],'Sin espacio').missions.map(m=>({...m,targetWeek:'2026-10-12'}));
+  const functions=source.slice(source.indexOf('  function getPlannerWeekDays()'),source.indexOf('  function reprogramEvent('));
+  const result=vm.runInContext(`(()=>{
+    const events=__events,cursor=today(),secondaryRef={current:__missions},goalTargets={...DEFAULT_GOAL_TARGETS};
+    let failures,message,finalEvents;
+    const persistSecondary=()=>{},setEvts=e=>finalEvents=e,setView=()=>{},setCursor=()=>{};
+    const setPlannerFailures=items=>failures=items,setPlannerMsg=value=>message=value;
+    ${functions}
+    organizePlannerWeek();
+    return {failures,message,finalEvents};
+  })()`,context);
+  assert.ok(result.failures.some(item=>item.type==='planner'&&item.label));
+  const secondary=result.failures.filter(item=>item.type==='secondary');
+  assert.equal(secondary.length,1);assert.equal(secondary[0].label,'Sin espacio');
+  assert.equal(secondary[0].reason,'No queda un bloque futuro libre de 1 hora esta semana.');
+  assert.ok(result.message.includes(`${result.failures.length} actividad(es)`));
+  assert.equal(Object.values(result.finalEvents).flat().filter(e=>!e.fixed&&e.planner).length,0);
+  assert.ok(result.failures.filter(item=>item.type==='planner').every(item=>item.reason==='No queda un bloque compatible con sus días, horario y conflictos actuales.'));
+});
+
 test('multiline import cleans bullets, appends, and deduplicates only active exact text',()=>{
   let result=add([], 'Lavar moto\nlavar ropa\nCortarme el pelo');
   assert.equal(result.added,3);
