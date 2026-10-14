@@ -206,3 +206,15 @@ test('initial PR records migrate targets safely and generic drops cannot create 
   const events={};const drop=call('eventsAfterDrop',events,{type:'new',catId:'secondary'},'2026-10-14',10,false);
   assert.equal(drop.changed,false);assert.equal(drop.events,events);
 });
+test('history status labels distinguish pending, scheduled, unfulfilled, completed and cancelled',()=>{
+  for(const [state,icon,label,color] of [
+    ['pending','○','Pendiente','#581c87'],
+    ['scheduled','◷','Programada','#6b21a8'],
+    ['unfulfilled','○','No cumplida','#581c87'],
+    ['completed','✓','Completada','#15803d'],
+    ['cancelled','✕','Cancelada','#6b7280']
+  ]){
+    const display=call('secondaryHistoryStatus',state);
+    assert.equal(display.icon,icon);assert.equal(display.label,label);assert.equal(display.color,color);
+  }
+});

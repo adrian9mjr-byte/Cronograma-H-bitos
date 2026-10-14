@@ -94,6 +94,15 @@ function weekKeyFromDate(d){return dateKey(getWeekDays(d)[0]);}
 function cleanSecondaryText(text){return String(text||'').trim().replace(/^(?:[-•*–—]\s*)+/,'').replace(/\s+/g,' ').trim();}
 function normalizeSecondaryText(text){return cleanSecondaryText(text).toLocaleLowerCase('es');}
 function activeSecondary(m){return m.status==='pending'||m.status==='scheduled';}
+function secondaryHistoryStatus(status){
+  return {
+    pending:{icon:'○',label:'Pendiente',color:'#581c87'},
+    scheduled:{icon:'◷',label:'Programada',color:'#6b21a8'},
+    unfulfilled:{icon:'○',label:'No cumplida',color:'#581c87'},
+    completed:{icon:'✓',label:'Completada',color:'#15803d'},
+    cancelled:{icon:'✕',label:'Cancelada',color:'#6b7280'}
+  }[status]||{icon:'○',label:'Pendiente',color:'#581c87'};
+}
 function secondaryTargetWeek(m){
   const created=new Date(m.createdAt);
   return m.targetWeek||m.scheduledWeek||weekKeyFromDate(addDays(Number.isNaN(created.getTime())?today():created,7));
@@ -1591,7 +1600,10 @@ function App(){
           return React.createElement(React.Fragment,null,
             React.createElement('div',{style:{fontSize:11,fontWeight:600,marginBottom:6,color:'#6b21a8'}},`${compactWeekRange(goalWeekDays)} · ${done}/${rows.length} completadas`),
             !rows.length&&React.createElement('div',{style:{fontSize:10,color:'#777'}},'Sin acciones registradas para esta semana'),
-            ...rows.map(row=>React.createElement('div',{key:row.id,style:{fontSize:11,overflowWrap:'anywhere',marginBottom:4,color:row.status==='completed'?'#15803d':row.status==='cancelled'?'#6b7280':'#581c87'}},`${row.status==='completed'?'✓':row.status==='cancelled'?'✕':'○'} ${row.text} — ${row.status==='completed'?'Completada':row.status==='cancelled'?'Cancelada':'No cumplida'}`))
+            ...rows.map(row=>{
+              const status=secondaryHistoryStatus(row.status);
+              return React.createElement('div',{key:row.id,style:{fontSize:11,overflowWrap:'anywhere',marginBottom:4,color:status.color}},`${status.icon} ${row.text} — ${status.label}`);
+            })
           );
         })()
       ),
