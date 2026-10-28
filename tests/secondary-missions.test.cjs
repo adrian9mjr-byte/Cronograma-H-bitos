@@ -203,19 +203,19 @@ test('archived cards cannot be dragged into a later week',()=>{
   const result=call('eventsAfterDrop',events,{type:'existing',dk:'2026-10-06',id:'old'},'2026-10-14',10,false);
   assert.equal(result.changed,false);assert.equal(result.events,events);
 });
-test('database loading keeps safe fallback and tolerates missing or corrupt mission JSON',async()=>{
-  for(const response of [{data:null,error:{message:'offline'}},{data:[],error:null},{data:[{key:'secondaryMissions',value:'corrupt'}],error:null}]){
+test('database loading accepts empty successful data and rejects errors or corrupt stored missions',async()=>{
+  for(const response of [{data:null,error:new Error('offline')},{data:[{key:'secondaryMissions',value:'corrupt'}],error:null}]){
     database.from=()=>({select(){return this},eq:async()=>response});
-    const loaded=await call('loadFromDB');
-    assert.equal(loaded.secondaryMissions.length,0);
-    assert.equal(Object.keys(loaded.events).length,0);
-    assert.ok(loaded.weeklyGoalTargets);
+    await assert.rejects(call('loadFromDB'));
   }
+  database.from=()=>({select(){return this},eq:async()=>({data:[],error:null})});
+  const loaded=await call('loadFromDB');
+  assert.equal(loaded.secondaryMissions.length,0);assert.equal(Object.keys(loaded.events).length,0);assert.ok(loaded.weeklyGoalTargets);
 });
 test('persistence propagates query and write errors instead of reporting false success',async()=>{
-  database.from=()=>({select(){return this},eq(){return this},maybeSingle:async()=>({data:null,error:new Error('offline')})});
+  database.from=()=>({select(){return this},eq(){return this},then(resolve){resolve({data:null,error:new Error('offline')});}});
   await assert.rejects(call('saveToDB','secondaryMissions',[]),/offline/);
-  database.from=()=>({select(){return this},eq(){return this},maybeSingle:async()=>({data:null,error:null}),insert:async()=>({error:new Error('write failed')})});
+  database.from=()=>({select(){return this},eq(){return this},then(resolve){resolve({data:[],error:null});},insert(){return {select:async()=>({error:new Error('write failed')})};}});
   await assert.rejects(call('saveToDB','secondaryMissions',[]),/write failed/);
 });
 
