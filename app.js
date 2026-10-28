@@ -443,9 +443,29 @@ function scheduleEventsNotifications(events, cats){
 
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
+  if(error){reportPersistenceError('load',null,error);throw error;}
+  if(!Array.isArray(data)) throw new Error('Respuesta de carga inválida; no se habilitará el guardado.');
+  const canonical=new Map();
+  for(const row of data){
+    // Sin metadatos de actualización verificados, no adivinar qué versión es la reciente.
+    if(canonical.has(row.key)&&canonical.get(row.key).value!==row.value){
+      const error=new Error(`Hay versiones diferentes de ${row.key}. Requieren revisión antes de guardar.`);
+      error.code='CONFLICTING_DUPLICATES';reportPersistenceError('load',row.key,error);throw error;
+    }
+    canonical.set(row.key,row);
+  }
   const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
-  data.forEach(row=>{
+  [...canonical.values()].forEach(row=>{
+    if(['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'].includes(row.key)){
+      try{
+        const value=JSON.parse(row.value);
+        if(!value||typeof value!=='object'||Array.isArray(value)!==['cats','secondaryMissions'].includes(row.key)) throw new Error('Estructura inválida');
+        if(row.key==='events'&&Object.values(value).some(day=>!Array.isArray(day)||day.some(e=>!e||typeof e!=='object'))) throw new Error('Eventos inválidos');
+      }catch(cause){
+        const error=new Error(`Datos inválidos en ${row.key}; carga detenida para protegerlos.`);
+        error.code='INVALID_STORED_DATA';reportPersistenceError('load',row.key,error);throw error;
+      }
+    }
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
     if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
@@ -461,16 +481,60 @@ async function loadFromDB(){
   return result;
 }
 
-async function saveToDB(key,value){
-  const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).maybeSingle();
-  if(error) throw error;
-  let result;
-  if(data){
-    result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key);
-  } else {
-    result=await sb.from('cronograma').insert({user_id:USER_ID,key,value:JSON.stringify(value)});
+function reportPersistenceError(operation,key,error){
+  console.error(`[Supabase ${operation}]`,{key,code:error?.code||null,message:error?.message||String(error),details:error?.details||null,hint:error?.hint||null});
+}
+const databaseWriteTails=new Map();
+function saveToDB(key,value){
+  const serialized=JSON.stringify(value);
+  const write=async()=>{
+    try{
+      const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key);
+      if(error) throw error;
+      if(!Array.isArray(data)) throw new Error('Respuesta de existencia inválida');
+      // Compatibilidad temporal: todas las filas de la key reciben el mismo valor.
+      const query=data.length
+        ?sb.from('cronograma').update({value:serialized}).eq('user_id',USER_ID).eq('key',key)
+        :sb.from('cronograma').insert({user_id:USER_ID,key,value:serialized});
+      const result=await query.select('id');
+      if(result.error) throw result.error;
+      if(!Array.isArray(result.data)||result.data.length<Math.max(1,data.length)) throw new Error('La escritura no confirmó todas las filas (revisa RLS).');
+    }catch(error){reportPersistenceError('save',key,error);throw error;}
+  };
+  const lockedWrite=()=>typeof navigator!=='undefined'&&navigator.locks
+    ?navigator.locks.request(`cronograma:${USER_ID}:${key}`,write):write();
+  const task=(databaseWriteTails.get(key)||Promise.resolve()).catch(()=>{}).then(lockedWrite);
+  databaseWriteTails.set(key,task);
+  return task;
+}
+function createPersistenceController(write,onStatus=()=>{}){
+  const pending=new Map();
+  let ready=false,running=false,failure=null,revision=0;
+  const status=()=>onStatus({pending:pending.size,error:failure,running});
+  async function drain(){
+    if(!ready||running||failure||!pending.size) return;
+    running=true;status();
+    try{
+      while(pending.size){
+        const [key,entry]=pending.entries().next().value;
+        try{await write(key,entry.value);}
+        catch(error){failure={key,error};break;}
+        if(pending.get(key)===entry) pending.delete(key);
+      }
+    }finally{running=false;status();}
   }
-  if(result.error) throw result.error;
+  return {
+    activate(){ready=true;},
+    enqueue(values){
+      if(!ready) return false;
+      for(const [key,value] of Object.entries(values)) pending.set(key,{value:JSON.parse(JSON.stringify(value)),revision:++revision});
+      status();Promise.resolve().then(drain);return true;
+    },
+    retry(){if(!ready)return;failure=null;status();return drain();},
+    flush:drain,
+    hasPending:()=>pending.size>0,
+    isReady:()=>ready
+  };
 }
 
 const {useState,useEffect,useRef}=React;
@@ -492,6 +556,8 @@ function App(){
   const [cursor,setCursor]=useState(today());
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
   const [loaded,setLoaded]=useState(false);
+  const [loadError,setLoadError]=useState(null);
+  const [saveError,setSaveError]=useState(null);
   const [modal,setModal]=useState(null);
   const [importModal,setImportModal]=useState(null); // Nuevo estado para la ventana de aprobación
   const [showNCF,setShowNCF]=useState(false);
@@ -515,7 +581,6 @@ function App(){
   const [weeklyStars,setWeeklyStars]=useState({});
   const [secondaryMissions,setSecondaryMissions]=useState([]);
   const secondaryRef=useRef([]);
-  const secondarySaveQueue=useRef(Promise.resolve());
   const [showSecondary,setShowSecondary]=useState(false);
   const [secondarySelection,setSecondarySelection]=useState([]);
   const [secondaryBatchFailures,setSecondaryBatchFailures]=useState([]);
@@ -525,7 +590,6 @@ function App(){
   const [completionFx,setCompletionFx]=useState(null);
   const [starFx,setStarFx]=useState(null);
   const starPanelRef=useRef(null);
-  const snapshotQueue=useRef(Promise.resolve());
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
@@ -535,10 +599,16 @@ function App(){
   const [dragEvt,setDragEvt]=useState(null);
   const [dragOver,setDragOver]=useState(null);
   const dragToken=useRef(0);
-  const saveTimer=useRef(null);
+  const persistence=useRef(null);
+  if(!persistence.current) persistence.current=createPersistenceController(saveToDB,state=>{
+    setSaveError(state.error);
+    if(state.error) setSync({dot:'#D85A30',msg:`Error al guardar ${state.error.key}. Cambios pendientes en este dispositivo.`});
+    else if(state.pending||state.running) setSync({dot:'#BA7517',msg:'Guardando...'});
+    else setSync({dot:'#1D9E75',msg:`Guardado ${new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})}`});
+  });
 
-  useEffect(()=>{
-    (async()=>{
+  async function loadInitialData(){
+      setLoadError(null);setSync({dot:'#BA7517',msg:'Cargando...'});
       try{
         const data=await loadFromDB();
         setEvents(data.events);
@@ -551,40 +621,45 @@ function App(){
         const missions=reconcileSecondaryMissions(data.secondaryMissions||[],data.events);
         secondaryRef.current=missions;
         setSecondaryMissions(missions);
-        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions,data.events);
+        persistence.current.activate();
         setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
+        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions,data.events);
         scheduleEventsNotifications(data.events, data.cats);
+        setLoaded(true);
       }catch(e){
-        setSync({dot:'#D85A30',msg:'Error al cargar'});
+        reportPersistenceError('load',null,e);
+        setLoadError(e);setGoalsReady(false);
+        setSync({dot:'#D85A30',msg:'No se pudieron cargar tus datos.'});
       }
-      setLoaded(true);
       if('Notification' in window){
         setNotifGranted(Notification.permission==='granted');
       }
-    })();
+  }
+  useEffect(()=>{
+    loadInitialData();
+    const beforeUnload=e=>{if(persistence.current.hasPending()){e.preventDefault();e.returnValue='';}};
+    window.addEventListener('beforeunload',beforeUnload);
+    return()=>window.removeEventListener('beforeunload',beforeUnload);
   },[]);
 
   useEffect(()=>{
     if(!loaded) return;
     const rollover=()=>{
       const next=rolloverSecondaryMissions(secondaryRef.current);
-      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,events);
+      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,eventsRef.current);
     };
     rollover();
     const timer=setInterval(rollover,60000);
     return()=>clearInterval(timer);
   },[loaded,events]);
 
-  function persistSecondary(next,evts=events){
+  function persistSecondary(next,evts=eventsRef.current){
+    if(!persistence.current.isReady()) return;
     secondaryRef.current=next;
     setSecondaryMissions(next);
-    // Reutiliza key/value sin requerir índices nuevos; serializa misiones y eventos.
-    secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(async()=>{
-      await saveToDB('secondaryMissions',next);
-      await saveToDB('events',evts);
-    });
-    secondarySaveQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar acciones; vuelve a intentar'}));
+    eventsRef.current=evts;
+    persistence.current.enqueue({secondaryMissions:next,events:evts});
   }
 
   // Detectar el cambio de semana incluso si la app permanece abierta.
@@ -601,10 +676,9 @@ function App(){
   },[goalsReady,currentGoalWeek]);
 
   function persistGoalSnapshots(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyGoalTargets(next);
-    // Serializar escrituras para que una edición rápida no restaure un snapshot viejo.
-    snapshotQueue.current=snapshotQueue.current.catch(()=>{}).then(()=>saveToDB('weeklyGoalTargets',next));
-    snapshotQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar historial de objetivos'}));
+    persistence.current.enqueue({weeklyGoalTargets:next});
   }
 
   function selectGoalsWeek(date){
@@ -626,21 +700,14 @@ function App(){
   },[]);
 
   function scheduleSave(evts,ct,goals=goalTargets){
-    if(saveTimer.current) clearTimeout(saveTimer.current);
-    setSync({dot:'#BA7517',msg:'Guardando...'});
-    saveTimer.current=setTimeout(async()=>{
-      try{
-        const latestEvents=eventsRef.current;
-        secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(()=>Promise.all([saveToDB('events',latestEvents),saveToDB('cats',ct),saveToDB('goals',goals)]));
-        await secondarySaveQueue.current;
-        const n=new Date();
-        setSync({dot:'#1D9E75',msg:`Guardado ${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`});
-        scheduleEventsNotifications(latestEvents,ct);
-      }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar'});}
-    },800);
+    if(!persistence.current.isReady()) return;
+    eventsRef.current=evts;
+    persistence.current.enqueue({events:evts,cats:ct,goals});
+    scheduleEventsNotifications(evts,ct);
   }
 
   function setEvts(e){
+    if(!persistence.current.isReady()) return;
     eventsRef.current=e;
     const next=reconcileSecondaryMissions(secondaryRef.current,e);
     if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,e);
@@ -658,22 +725,19 @@ function App(){
     scheduleSave(events,cats,next);
   }
 
-  async function persistWeeklyStars(next){
+  function persistWeeklyStars(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyStars(next);
-    try{await saveToDB('weeklyStars',next);}
-    catch(e){setSync({dot:'#D85A30',msg:'Error al guardar estrellas'});}
+    persistence.current.enqueue({weeklyStars:next});
   }
 
   function missionsForWeek(wk){
     return (Object.prototype.hasOwnProperty.call(weeklyMissions,wk)?weeklyMissions[wk]:(wk===weekKeyFromDate(today())?freshDefaultMissions():[])).map(m=>({...m}));
   }
-  async function persistWeeklyMissions(next){
+  function persistWeeklyMissions(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyMissions(next);
-    setSync({dot:'#BA7517',msg:'Guardando metas...'});
-    try{
-      await saveToDB('weeklyMissions',next);
-      setSync({dot:'#1D9E75',msg:'Metas guardadas ✓'});
-    }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar metas'});}
+    persistence.current.enqueue({weeklyMissions:next});
   }
   function updateMission(wk,id,patch){
     if(!goalsReady||wk!==weekKeyFromDate(today())) return;
@@ -1376,6 +1440,11 @@ function App(){
   const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto',WebkitOverflowScrolling:'touch'};
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
+  if(loadError) return React.createElement('div',{role:'alert',style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,padding:24,textAlign:'center',fontFamily:'system-ui'}},
+    React.createElement('div',null,'No se pudieron cargar tus datos.'),
+    React.createElement('div',{style:{fontSize:12,color:'#666'}},'El guardado está bloqueado para proteger tu información.'),
+    React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
+  );
   if(!loaded) return React.createElement('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,color:'#666',fontSize:14}},
     React.createElement('div',{style:{width:28,height:28,border:'3px solid #eee',borderTopColor:'#1D9E75',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}),
     React.createElement('span',null,'Cargando tu cronograma...'),
@@ -1395,6 +1464,7 @@ function App(){
     React.createElement('div',{style:{display:'flex',alignItems:'center',gap:6,padding:'6px 12px',background:'#fff',borderRadius:8,border:'1px solid #e5e5e5',marginBottom:10,fontSize:11,color:'#666'}},
       React.createElement('div',{style:{width:7,height:7,borderRadius:'50%',background:sync.dot,flexShrink:0}}),
       React.createElement('span',{style:{flex:1}},sync.msg),
+      saveError&&React.createElement('button',{onClick:()=>persistence.current.retry(),style:{...btnBase,fontSize:11}},'Reintentar guardado'),
       React.createElement('button',{onClick:()=>setShowRepMgr(true),style:{...btnBase,fontSize:10,padding:'2px 8px',color:'#666'}},`↻ Repeticiones (${repIds.length})`)
     ),
 
