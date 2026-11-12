@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'../app.js'),'utf8');
-function harness(rows=[],day='2026-11-05'){
+function harness(rows=[],day='2026-11-05',options={}){
   const operations=[],logs=[];
   const failures={};
   const db={from(){
@@ -13,9 +13,10 @@ function harness(rows=[],day='2026-11-05'){
       eq(k,v){filters[k]=v;return query;},
       insert(v){op='insert';payload=v;return query;},
       update(v){op='update';payload=v;return query;},
-      then(resolve,reject){return Promise.resolve().then(()=>{
+      then(resolve,reject){return Promise.resolve().then(async()=>{
         const key=filters.key||payload?.key;
         operations.push({op,key,payload,fields});
+        if(options.beforeQuery) await options.beforeQuery({op,key,filters,rows});
         const error=failures[op]||failures[key];
         if(error)return {data:null,error};
         const matching=rows.filter(r=>Object.entries(filters).every(([k,v])=>r[k]===v));
@@ -45,7 +46,7 @@ function harness(rows=[],day='2026-11-05'){
       }
     }
   };
-  const context=vm.createContext({Date:Clock,window:{innerWidth:1200,addEventListener(){},removeEventListener(){}},setInterval:()=>1,clearInterval(){},console:{error:(...args)=>logs.push(args)},supabase:{createClient:()=>db},React,ReactDOM:{createRoot:()=>({render(){}})},document:{getElementById(){}}});
+  const context=vm.createContext({Date:Clock,window:{innerWidth:options.width??1200,addEventListener(){},removeEventListener(){}},setInterval:()=>1,clearInterval(){},console:{error:(...args)=>logs.push(args)},supabase:{createClient:()=>db},React,ReactDOM:{createRoot:()=>({render(){}})},document:{getElementById(){}}});
   vm.runInContext(source,context);
   async function render(){
     let tree;
@@ -253,4 +254,153 @@ test('queue snapshots cannot mutate under a delayed write',async()=>{
   const seen=[],c=harness().call('createPersistenceController',async(k,v)=>seen.push(v));
   const events={day:[{id:'a'}]};c.activate();c.enqueue({events});events.day[0].id='mutated';
   await c.flush();assert.equal(seen[0].day[0].id,'a');
+});
+
+const kiteKey='dailyBarriletes',kiteDay='2026-11-05';
+const baseRows=()=>Object.entries({
+  events:{'2026-10-14':[{id:'mock-event',cat:'mente',h:9,dur:2,done:true}]},
+  cats:[],goals:{},weeklyMissions:{'2026-10-12':[{id:'mock-goal',text:'Meta sintética',done:true}]},
+  weeklyGoalTargets:{[resume]:{}},weeklyStars:{'2026-10-12':['2026-10-14']},secondaryMissions:[]
+}).map(([k,v],i)=>row(k,v,i+1));
+const writes=h=>h.operations.filter(o=>o.op!=='select');
+const button=(tree,label)=>nodes(tree).find(n=>n.type==='button'&&content(n)===label);
+const dayButton=(tree,day)=>nodes(tree).find(n=>n.type==='button'&&n.props['aria-label']?.startsWith('Barriletes '+day+':'));
+const footer=tree=>nodes(tree).find(n=>n.props['aria-label']==='Registro semanal de barriletes');
+async function enterWeek(h){
+  button(await h.render(),'Semana').props.onClick();
+  return h.render();
+}
+async function editKites(h,tree,day,long,short){
+  dayButton(tree,day).props.onClick();
+  for(const [index,value] of [long,short].entries()){
+    const dialog=nodes(await h.render()).find(n=>n.props.role==='dialog');
+    nodes(dialog).filter(n=>n.type==='input')[index].props.onChange({target:{value}});
+  }
+  nodes(await h.render()).find(n=>n.props.role==='dialog').props.onSubmit({preventDefault(){}});
+  return h.render();
+}
+test('barriletes: formats long, short, both, zero and absent; exact daily and weekly totals',()=>{
+  const h=harness();
+  const variants=[[[1,0],'1 L'],[[0,1],'1 C'],[[3,1],'3 L · 1 C'],[[0,0],'0 L · 0 C']];
+  const values=Object.fromEntries(variants.map(([[long,short],label],i)=>{
+    assert.equal(h.call('barrileteLabel',{long,short}),label);
+    return ['2026-11-0'+(i+2),{long,short}];
+  }));
+  assert.equal(h.call('barrileteLabel'),'+ Registrar');
+  assert.equal(h.call('barrileteTotals',['2026-11-04'],values).total,4n);
+  const {long,short,total}=h.call('barrileteTotals',['2026-11-02','2026-11-03','2026-11-04','2026-11-05','2026-11-06','2026-11-07','2026-11-08'],values);
+  assert.deepEqual([long,short,total],[4n,2n,6n]);
+});
+test('barriletes: validation rejects decimals, negatives, empty, exponent and non-numbers',()=>{
+  const h=harness();
+  for(const value of ['-1','1.5','1,5','','1e2','NaN','abc','9007199254740992']) assert.equal(h.call('parseBarrileteCount',value),null);
+  assert.equal(h.call('parseBarrileteCount','0'),0);
+  assert.equal(h.call('parseBarrileteCount','12'),12);
+});
+test('barriletes: week footer only, no automatic key, explicit saves preserve all historical rows and reload',async()=>{
+  const rows=baseRows(),original=plain(rows),h=harness(rows);
+  assert.equal(footer(await h.render()),undefined);
+  let tree=await enterWeek(h);
+  assert.equal(nodes(footer(tree)).filter(n=>n.type==='button').length,7);
+  assert.equal(content(dayButton(tree,kiteDay)),'+ Registrar');
+  button(tree,'→').props.onClick();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Total: 0'));
+  button(tree,'←').props.onClick();
+  button(await h.render(),'←').props.onClick();
+  tree=await h.render();
+  assert.equal(writes(h).length,0);
+  tree=await editKites(h,tree,'2026-10-29','-1','1.5');
+  assert.ok(nodes(tree).some(n=>n.props.role==='alert'&&content(n).includes('números enteros')));
+  assert.equal(writes(h).length,0);
+  button(tree,'Cancelar').props.onClick();
+  tree=await editKites(h,await h.render(),'2026-10-29','1','0');
+  assert.equal(content(dayButton(tree,'2026-10-29')),'1 L');
+  assert.equal(writes(h)[0].op,'insert');
+  tree=await editKites(h,tree,'2026-10-30','0','1');
+  assert.equal(content(dayButton(tree,'2026-10-30')),'1 C');
+  tree=await editKites(h,tree,'2026-10-29','3','1');
+  assert.equal(content(dayButton(tree,'2026-10-29')),'3 L · 1 C');
+  tree=await editKites(h,tree,'2026-10-31','0','0');
+  assert.equal(content(dayButton(tree,'2026-10-31')),'0 L · 0 C');
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Total: 5'));
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.ok(writes(h).every(o=>o.key===kiteKey));
+  assert.deepEqual(rows.slice(0,7),original);
+  const reload=harness(rows);
+  tree=await enterWeek(reload);
+  button(tree,'←').props.onClick();
+  tree=await reload.render();
+  assert.equal(content(dayButton(tree,'2026-10-29')),'3 L · 1 C');
+  assert.equal(content(dayButton(tree,'2026-10-31')),'0 L · 0 C');
+  assert.equal(writes(reload).length,0);
+});
+test('barriletes: invalid or duplicate optional rows leave calendar visible and disable edits',async()=>{
+  for(const invalid of [[{...row(kiteKey,{}),value:'invalid'}],[row(kiteKey,{},8),row(kiteKey,{},9)]]){
+    const h=harness([...baseRows(),...invalid]);
+    const tree=await enterWeek(h);
+    assert.equal(dayButton(tree,kiteDay).props.disabled,true);
+    assert.ok(nodes(footer(tree)).some(n=>n.props.role==='alert'));
+    assert.equal(writes(h).length,0);
+  }
+});
+test('barriletes: failed initial load prevents the footer and any writes',async()=>{
+  const h=harness(baseRows());h.failures.select=new Error('offline');
+  const tree=await h.render();
+  assert.ok(button(tree,'Reintentar carga'));
+  assert.equal(footer(tree),undefined);
+  assert.equal(writes(h).length,0);
+});
+test('barriletes: failed read retains pending edit, retry confirms without replacing other dates',async()=>{
+  const rows=[...baseRows(),row(kiteKey,{'2026-10-29':{long:2,short:0}},8)],h=harness(rows);
+  let tree=await enterWeek(h);
+  const stored=rows[7].value;
+  h.failures.select=new Error('offline');
+  tree=await editKites(h,tree,kiteDay,'1','2');
+  assert.equal(content(dayButton(tree,kiteDay)),'1 L · 2 C');
+  assert.equal(rows[7].value,stored);
+  assert.equal(writes(h).length,0);
+  assert.ok(nodes(footer(tree)).some(n=>content(n).includes('siguen pendientes')));
+  delete h.failures.select;
+  button(tree,'Reintentar barriletes').props.onClick();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.deepEqual(JSON.parse(rows[7].value),{'2026-10-29':{long:2,short:0},[kiteDay]:{long:1,short:2}});
+});
+test('barriletes: rapid edits and a concurrent remote edit preserve all days and confirm only at the end',async()=>{
+  let raced=false,release,start;
+  const gate=new Promise(r=>release=r),started=new Promise(r=>start=r);
+  const rows=[...baseRows(),row(kiteKey,{},8)];
+  const h=harness(rows,kiteDay,{async beforeQuery({op,key}){
+    if(op==='update'&&key===kiteKey&&!raced){
+      raced=true;start();await gate;
+      rows[7].value=JSON.stringify({'2026-11-02':{long:7,short:1}});
+    }
+  }});
+  let tree=await enterWeek(h);
+  tree=await editKites(h,tree,kiteDay,'1','0');
+  await started;
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Guardando barriletes…'));
+  tree=await editKites(h,tree,'2026-11-06','0','2');
+  tree=await editKites(h,tree,kiteDay,'3','1');
+  release();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.deepEqual(JSON.parse(rows[7].value),{'2026-11-02':{long:7,short:1},[kiteDay]:{long:3,short:1},'2026-11-06':{long:0,short:2}});
+  assert.ok(writes(h).every(o=>o.key===kiteKey));
+});
+test('barriletes: footer follows both weekly grids inside the same mobile scroller',async()=>{
+  const h=harness(baseRows(),kiteDay,{width:390});
+  const tree=await enterWeek(h);
+  const region=footer(tree);
+  const wrapper=nodes(tree).find(n=>n.children.includes(region));
+  assert.equal(wrapper.props.style.overflowX,'auto');
+  const index=wrapper.children.indexOf(region);
+  const hours=wrapper.children[index-1],header=wrapper.children[index-2],counts=region.children[0];
+  assert.equal(counts.children.length,8);
+  for(const grid of [header,hours,counts]){
+    assert.equal(grid.props.style.gridTemplateColumns,'44px repeat(7,1fr)');
+    assert.equal(grid.props.style.minWidth,820);
+  }
+  assert.equal(counts.props.onDrop,undefined);
 });
