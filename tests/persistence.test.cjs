@@ -6,17 +6,31 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'../app.js'),'u
 function harness(rows=[],day='2026-11-05',options={}){
   const operations=[],logs=[];
   const failures={};
-  const db={from(){
+  const db={async rpc(name,args){
+    assert.equal(name,'save_barrilete_day');
+    operations.push({op:'rpc',key:'dailyBarriletes',args});
+    if(options.beforeRpc) await options.beforeRpc({args,rows});
+    const error=failures.rpc;
+    if(error) return {data:null,error};
+    if(options.rpcResponse) return options.rpcResponse;
+    const {p_user_id,p_day,p_long,p_short}=args;
+    const matched=rows.filter(r=>r.user_id===p_user_id&&r.key==='dailyBarriletes');
+    if(matched.length>1)return {data:null,error:{code:'21000'}};
+    const previous=matched[0];
+    const value=JSON.stringify({...JSON.parse(previous?.value??'{}'),[p_day]:{long:p_long,short:p_short}});
+    if(previous) previous.value=value;
+    else rows.push({id:rows.length+1,user_id:p_user_id,key:'dailyBarriletes',value});
+    return {data:{day:p_day,long:p_long,short:p_short},error:null};
+  },from(){
     let op='select',fields='*',payload,filters={};
     const query={
       select(f){fields=f;return query;},
       eq(k,v){filters[k]=v;return query;},
       insert(v){op='insert';payload=v;return query;},
       update(v){op='update';payload=v;return query;},
-      then(resolve,reject){return Promise.resolve().then(async()=>{
+      then(resolve,reject){return Promise.resolve().then(()=>{
         const key=filters.key||payload?.key;
         operations.push({op,key,payload,fields});
-        if(options.beforeQuery) await options.beforeQuery({op,key,filters,rows});
         const error=failures[op]||failures[key];
         if(error)return {data:null,error};
         const matching=rows.filter(r=>Object.entries(filters).every(([k,v])=>r[k]===v));
@@ -257,6 +271,9 @@ test('queue snapshots cannot mutate under a delayed write',async()=>{
 });
 
 const kiteKey='dailyBarriletes',kiteDay='2026-11-05';
+const longBarrileteHistory=()=>Object.fromEntries(Array.from({length:3653},(_,i)=>[
+  new Date(Date.UTC(2015,0,1+i)).toISOString().slice(0,10),{long:i%13,short:i%7}
+]));
 const baseRows=()=>Object.entries({
   events:{'2026-10-14':[{id:'mock-event',cat:'mente',h:9,dur:2,done:true}]},
   cats:[],goals:{},weeklyMissions:{'2026-10-12':[{id:'mock-goal',text:'Meta sintética',done:true}]},
@@ -316,7 +333,8 @@ test('barriletes: week footer only, no automatic key, explicit saves preserve al
   button(tree,'Cancelar').props.onClick();
   tree=await editKites(h,await h.render(),'2026-10-29','1','0');
   assert.equal(content(dayButton(tree,'2026-10-29')),'1 L');
-  assert.equal(writes(h)[0].op,'insert');
+  assert.equal(writes(h)[0].op,'rpc');
+  assert.equal(rows.filter(r=>r.key===kiteKey).length,1);
   tree=await editKites(h,tree,'2026-10-30','0','1');
   assert.equal(content(dayButton(tree,'2026-10-30')),'1 C');
   tree=await editKites(h,tree,'2026-10-29','3','1');
@@ -351,17 +369,17 @@ test('barriletes: failed initial load prevents the footer and any writes',async(
   assert.equal(footer(tree),undefined);
   assert.equal(writes(h).length,0);
 });
-test('barriletes: failed read retains pending edit, retry confirms without replacing other dates',async()=>{
+test('barriletes: failed RPC retains pending edit, retry confirms without replacing other dates',async()=>{
   const rows=[...baseRows(),row(kiteKey,{'2026-10-29':{long:2,short:0}},8)],h=harness(rows);
   let tree=await enterWeek(h);
   const stored=rows[7].value;
-  h.failures.select=new Error('offline');
+  h.failures.rpc=new Error('offline');
   tree=await editKites(h,tree,kiteDay,'1','2');
   assert.equal(content(dayButton(tree,kiteDay)),'1 L · 2 C');
   assert.equal(rows[7].value,stored);
-  assert.equal(writes(h).length,0);
+  assert.deepEqual(writes(h).map(o=>o.op),['rpc']);
   assert.ok(nodes(footer(tree)).some(n=>content(n).includes('siguen pendientes')));
-  delete h.failures.select;
+  delete h.failures.rpc;
   button(tree,'Reintentar barriletes').props.onClick();
   tree=await h.render();
   assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
@@ -370,11 +388,12 @@ test('barriletes: failed read retains pending edit, retry confirms without repla
 test('barriletes: rapid edits and a concurrent remote edit preserve all days and confirm only at the end',async()=>{
   let raced=false,release,start;
   const gate=new Promise(r=>release=r),started=new Promise(r=>start=r);
-  const rows=[...baseRows(),row(kiteKey,{},8)];
-  const h=harness(rows,kiteDay,{async beforeQuery({op,key}){
-    if(op==='update'&&key===kiteKey&&!raced){
+  const history=longBarrileteHistory();
+  const rows=[...baseRows(),row(kiteKey,history,8)];
+  const h=harness(rows,kiteDay,{async beforeRpc(){
+    if(!raced){
       raced=true;start();await gate;
-      rows[7].value=JSON.stringify({'2026-11-02':{long:7,short:1}});
+      rows[7].value=JSON.stringify({...history,'2026-11-02':{long:7,short:1}});
     }
   }});
   let tree=await enterWeek(h);
@@ -386,8 +405,31 @@ test('barriletes: rapid edits and a concurrent remote edit preserve all days and
   release();
   tree=await h.render();
   assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
-  assert.deepEqual(JSON.parse(rows[7].value),{'2026-11-02':{long:7,short:1},[kiteDay]:{long:3,short:1},'2026-11-06':{long:0,short:2}});
-  assert.ok(writes(h).every(o=>o.key===kiteKey));
+  assert.deepEqual(JSON.parse(rows[7].value),{...history,'2026-11-02':{long:7,short:1},[kiteDay]:{long:3,short:1},'2026-11-06':{long:0,short:2}});
+  assert.ok(writes(h).every(o=>o.op==='rpc'&&o.key===kiteKey));
+});
+test('barriletes: ten years of history stay intact with a constant-size RPC request',async()=>{
+  const history=longBarrileteHistory();
+  assert.ok(encodeURIComponent(JSON.stringify(history)).length>100000);
+  const rows=[...baseRows(),row(kiteKey,history,8)];
+  const app=harness(rows);
+  const tree=await enterWeek(app);
+  await editKites(app,tree,kiteDay,'4','2');
+  const changes=writes(app);
+  assert.deepEqual(changes.map(o=>o.op),['rpc']);
+  assert.deepEqual(plain(changes[0].args),{p_user_id:'adrian_cronograma',p_day:kiteDay,p_long:4,p_short:2});
+  assert.ok(JSON.stringify(changes[0].args).length<150);
+  assert.deepEqual(JSON.parse(rows[7].value),{...history,[kiteDay]:{long:4,short:2}});
+});
+test('barriletes: missing RPC or mismatched confirmation never falls back to raw writes',async()=>{
+  const unavailable=harness(baseRows());unavailable.failures.rpc={code:'PGRST202'};
+  await assert.rejects(unavailable.call('saveBarrileteDay',kiteDay,{long:1,short:0}),e=>e.code==='PGRST202');
+  const wrong=harness(baseRows(),kiteDay,{rpcResponse:{data:{day:kiteDay,long:2,short:0},error:null}});
+  await assert.rejects(wrong.call('saveBarrileteDay',kiteDay,{long:1,short:0}),/no confirmó/);
+  for(const app of [unavailable,wrong]){
+    assert.deepEqual(app.operations.map(o=>o.op),['rpc']);
+    assert.equal(app.rows.length,7);
+  }
 });
 test('barriletes: footer follows both weekly grids inside the same mobile scroller',async()=>{
   const h=harness(baseRows(),kiteDay,{width:390});

@@ -573,36 +573,14 @@ function saveToDB(key,value){
 }
 function saveBarrileteDay(day,record){
   return serializeDatabaseWrite(BARRILETES_KEY,async()=>{
-    const read=async()=>{
-      const {data,error}=await sb.from('cronograma').select('id,value').eq('user_id',USER_ID).eq('key',BARRILETES_KEY);
-      if(error) throw error;
-      return {row:data?.[0],records:readBarriletes(data)};
-    };
     try{
       if(!validBarrileteDay(day)||!validBarrileteRecord(record)) throw new Error('Fecha o cantidades inválidas.');
-      for(let attempt=0;attempt<3;attempt++){
-        const {row,records}=await read();
-        if(records[day]?.long===record.long&&records[day]?.short===record.short) return;
-        const value=JSON.stringify({...records,[day]:record});
-        // La comparación del valor evita sobrescribir ediciones concurrentes de otros días.
-        const query=row
-          ?sb.from('cronograma').update({value}).eq('user_id',USER_ID).eq('key',BARRILETES_KEY).eq('id',row.id).eq('value',row.value)
-          :sb.from('cronograma').insert({user_id:USER_ID,key:BARRILETES_KEY,value});
-        const result=await query.select('id');
-        if(result.error){
-          if(!row&&result.error.code==='23505') continue;
-          throw result.error;
-        }
-        if(result.data?.length===1){
-          if(!row){
-            const verified=await read();
-            if(verified.records[day]?.long!==record.long||verified.records[day]?.short!==record.short) continue;
-          }
-          return;
-        }
-        if(!row||!Array.isArray(result.data)||result.data.length) throw new Error('El servidor no confirmó el registro.');
-      }
-      throw new Error('No se confirmó la actualización. Revisa la conexión o reintenta.');
+      // El servidor combina una fecha con el valor actual dentro de la transacción.
+      const {data,error}=await sb.rpc('save_barrilete_day',{
+        p_user_id:USER_ID,p_day:day,p_long:record.long,p_short:record.short
+      });
+      if(error) throw error;
+      if(data?.day!==day||data.long!==record.long||data.short!==record.short) throw new Error('El servidor no confirmó el registro.');
     }catch(error){reportPersistenceError('save',BARRILETES_KEY,error);throw error;}
   });
 }
