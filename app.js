@@ -99,6 +99,7 @@ function secondaryHistoryStatus(status){
     pending:{icon:'○',label:'Pendiente',color:'#581c87'},
     scheduled:{icon:'◷',label:'Programada',color:'#6b21a8'},
     unfulfilled:{icon:'○',label:'No cumplida',color:'#581c87'},
+    paused:{icon:'Ⅱ',label:'Pausa',color:'#64748b'},
     completed:{icon:'✓',label:'Completada',color:'#15803d'},
     cancelled:{icon:'✕',label:'Cancelada',color:'#6b7280'}
   }[status]||{icon:'○',label:'Pendiente',color:'#581c87'};
@@ -109,11 +110,11 @@ function secondaryTargetWeek(m){
 }
 function retargetSecondaryMission(m,week,now=new Date()){
   const currentWeek=weekKeyFromDate(now);
-  const history=Object.fromEntries(Object.entries(m.history||{}).filter(([wk,row])=>wk<currentWeek||['completed','cancelled','unfulfilled'].includes(row.status)));
-  history[week]={...(history[week]||{}),text:m.text,status:'pending'};
+  const history=Object.fromEntries(Object.entries(m.history||{}).filter(([wk,row])=>wk<currentWeek||['completed','cancelled','unfulfilled','paused'].includes(row.status)));
+  if(history[week]?.status!=='paused') history[week]={...(history[week]||{}),text:m.text,status:'pending'};
   return {...m,targetWeek:week,history};
 }
-function secondaryEligibleForWeek(m,week){return m.status==='pending'&&secondaryTargetWeek(m)<=week;}
+function secondaryEligibleForWeek(m,week){return m.status==='pending'&&secondaryTargetWeek(m)<=week&&m.history?.[week]?.status!=='paused';}
 function parseSecondaryMissions(value){
   try{
     const rows=typeof value==='string'?JSON.parse(value):value;
@@ -123,7 +124,7 @@ function parseSecondaryMissions(value){
         const {carryWeek,...fields}=m;
         const targetWeek=secondaryTargetWeek(m);
         const history=m.history&&typeof m.history==='object'&&!Array.isArray(m.history)?m.history:{};
-        return {...fields,text:cleanSecondaryText(m.text),normalizedText:normalizeSecondaryText(m.text),targetWeek,weeksCarried:Number.isFinite(m.weeksCarried)?m.weeksCarried:0,history:Object.fromEntries(Object.entries(history).filter(([wk,row])=>m.targetWeek||wk>=targetWeek||['completed','cancelled','unfulfilled'].includes(row?.status)))};
+        return {...fields,text:cleanSecondaryText(m.text),normalizedText:normalizeSecondaryText(m.text),targetWeek,weeksCarried:Number.isFinite(m.weeksCarried)?m.weeksCarried:0,history:Object.fromEntries(Object.entries(history).filter(([wk,row])=>m.targetWeek||wk>=targetWeek||['completed','cancelled','unfulfilled','paused'].includes(row?.status)))};
       });
   }catch(e){return [];}
 }
@@ -148,9 +149,11 @@ function rolloverSecondaryMissions(missions,now=new Date()){
     let week=secondaryTargetWeek(m);
     if(week>currentWeek) return {...m,targetWeek:week};
     while(week<currentWeek){
-      m.history[week]={...(m.history[week]||{}),text:m.history[week]?.text||m.text,status:'unfulfilled'};
+      if(m.history[week]?.status!=='paused'){
+        m.history[week]={...(m.history[week]||{}),text:m.history[week]?.text||m.text,status:'unfulfilled'};
+        m.weeksCarried=(m.weeksCarried||0)+1;
+      }
       week=weekKeyFromDate(addDays(new Date(week+'T12:00:00'),7));
-      m.weeksCarried=(m.weeksCarried||0)+1;
       if(!m.history[week]) m.history[week]={text:m.text,status:'pending'};
     }
     m.targetWeek=week;
@@ -171,14 +174,23 @@ function reconcileSecondaryMissions(missions,events,now=new Date()){
     if(!linked){
       if(original.status!=='scheduled') return original;
       const week=original.scheduledWeek;
-      return {...original,status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,history:{...original.history,[week]:{...original.history[week],status:'pending'}}};
+      const history=original.history[week]?.status==='paused'?original.history:{...original.history,[week]:{...original.history[week],status:'pending'}};
+      return {...original,status:'pending',scheduledWeek:null,scheduledDate:null,linkedEventId:null,history};
     }
     const {dk,e}=linked,week=weekKeyFromDate(new Date(dk+'T12:00:00'));
     const completedAt=e.done?(original.completedAt||now.toISOString()):null;
     const history=week===secondaryTargetWeek(original)?{...original.history}:retargetSecondaryMission(original,week,now).history;
-    history[week]={text:e.note||original.text,status:e.done?'completed':'scheduled',date:dk,h:e.h,half:!!e.half,eventId:e.id,completedAt};
+    if(history[week]?.status!=='paused') history[week]={text:e.note||original.text,status:e.done?'completed':'scheduled',date:dk,h:e.h,half:!!e.half,eventId:e.id,completedAt};
     return {...original,targetWeek:week,text:e.note||original.text,normalizedText:normalizeSecondaryText(e.note||original.text),status:e.done?'completed':'scheduled',scheduledWeek:week,scheduledDate:dk,linkedEventId:e.id,completedAt,history};
   });
+}
+function secondaryWeekSummary(missions,week){
+  const rows=missions.map(m=>({id:m.id,...m.history?.[week]})).filter(row=>row.status);
+  return {rows,done:rows.filter(row=>row.status==='completed').length,total:rows.filter(row=>row.status!=='paused').length};
+}
+
+function categoryForActivity(cats,id){
+  return cats.find(c=>c.id===id)||{id,name:'Categoría histórica no disponible',bg:'#f1f5f9',text:'#334155',color:'#64748b',completionAnimationEnabled:false};
 }
 function pickSecondarySlot(events,week,now=new Date(),random=Math.random){
   const options=[];
@@ -240,10 +252,14 @@ function compactWeekRange(days){
   return `${label(first)} – ${label(last)}`;
 }
 
-function starsByWeek(events,existing={}){
-  const keys=new Set(Object.keys(existing||{}));
-  Object.keys(events||{}).forEach(dk=>keys.add(weekKeyFromDate(new Date(dk+'T12:00:00'))));
-  return Object.fromEntries([...keys].map(wk=>[wk,completedDaysForWeek(events,new Date(wk+'T12:00:00'))]));
+function updateStarsForChangedWeeks(previous,next,existing){
+  const weeks=new Set();
+  for(const day of new Set([...Object.keys(previous),...Object.keys(next)])){
+    if(JSON.stringify(previous[day]||[])!==JSON.stringify(next[day]||[])) weeks.add(weekKeyFromDate(new Date(day+'T12:00:00')));
+  }
+  const result={...existing};
+  for(const week of weeks) result[week]=completedDaysForWeek(next,new Date(week+'T12:00:00'));
+  return result;
 }
 
 function weeklyGoalStats(events,days,targets){
@@ -441,11 +457,38 @@ function scheduleEventsNotifications(events, cats){
   });
 }
 
+const REQUIRED_HISTORY_KEYS=['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'];
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
+  if(error){reportPersistenceError('load',null,error);throw error;}
+  if(!Array.isArray(data)) throw new Error('Respuesta de carga inválida; no se habilitará el guardado.');
+  const canonical=new Map();
+  for(const row of data){
+    // Sin metadatos de actualización verificados, no adivinar qué versión es la reciente.
+    if(canonical.has(row.key)&&canonical.get(row.key).value!==row.value){
+      const error=new Error(`Hay versiones diferentes de ${row.key}. Requieren revisión antes de guardar.`);
+      error.code='CONFLICTING_DUPLICATES';reportPersistenceError('load',row.key,error);throw error;
+    }
+    canonical.set(row.key,row);
+  }
+  const missing=REQUIRED_HISTORY_KEYS.filter(key=>!canonical.has(key));
+  if(missing.length){
+    const error=new Error(`No se pudo verificar el historial. Faltan claves: ${missing.join(', ')}.`);
+    error.code='INCOMPLETE_HISTORY';
+    throw error;
+  }
   const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
-  data.forEach(row=>{
+  [...canonical.values()].forEach(row=>{
+    if(REQUIRED_HISTORY_KEYS.includes(row.key)){
+      try{
+        const value=JSON.parse(row.value);
+        if(!value||typeof value!=='object'||Array.isArray(value)!==['cats','secondaryMissions'].includes(row.key)) throw new Error('Estructura inválida');
+        if(row.key==='events'&&Object.values(value).some(day=>!Array.isArray(day)||day.some(e=>!e||typeof e!=='object'))) throw new Error('Eventos inválidos');
+      }catch(cause){
+        const error=new Error(`Datos inválidos en ${row.key}; carga detenida para protegerlos.`);
+        error.code='INVALID_STORED_DATA';reportPersistenceError('load',row.key,error);throw error;
+      }
+    }
     if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
     if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
     if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
@@ -461,16 +504,60 @@ async function loadFromDB(){
   return result;
 }
 
-async function saveToDB(key,value){
-  const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).maybeSingle();
-  if(error) throw error;
-  let result;
-  if(data){
-    result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key);
-  } else {
-    result=await sb.from('cronograma').insert({user_id:USER_ID,key,value:JSON.stringify(value)});
+function reportPersistenceError(operation,key,error){
+  console.error(`[Supabase ${operation}]`,{key,code:error?.code||null,message:error?.message||String(error),details:error?.details||null,hint:error?.hint||null});
+}
+const databaseWriteTails=new Map();
+function saveToDB(key,value){
+  const serialized=JSON.stringify(value);
+  const write=async()=>{
+    try{
+      const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key);
+      if(error) throw error;
+      if(!Array.isArray(data)) throw new Error('Respuesta de existencia inválida');
+      // Compatibilidad temporal: todas las filas de la key reciben el mismo valor.
+      const query=data.length
+        ?sb.from('cronograma').update({value:serialized}).eq('user_id',USER_ID).eq('key',key)
+        :sb.from('cronograma').insert({user_id:USER_ID,key,value:serialized});
+      const result=await query.select('id');
+      if(result.error) throw result.error;
+      if(!Array.isArray(result.data)||result.data.length<Math.max(1,data.length)) throw new Error('La escritura no confirmó todas las filas (revisa RLS).');
+    }catch(error){reportPersistenceError('save',key,error);throw error;}
+  };
+  const lockedWrite=()=>typeof navigator!=='undefined'&&navigator.locks
+    ?navigator.locks.request(`cronograma:${USER_ID}:${key}`,write):write();
+  const task=(databaseWriteTails.get(key)||Promise.resolve()).catch(()=>{}).then(lockedWrite);
+  databaseWriteTails.set(key,task);
+  return task;
+}
+function createPersistenceController(write,onStatus=()=>{}){
+  const pending=new Map();
+  let ready=false,running=false,failure=null,revision=0;
+  const status=()=>onStatus({pending:pending.size,error:failure,running});
+  async function drain(){
+    if(!ready||running||failure||!pending.size) return;
+    running=true;status();
+    try{
+      while(pending.size){
+        const [key,entry]=pending.entries().next().value;
+        try{await write(key,entry.value);}
+        catch(error){failure={key,error};break;}
+        if(pending.get(key)===entry) pending.delete(key);
+      }
+    }finally{running=false;status();}
   }
-  if(result.error) throw result.error;
+  return {
+    activate(){ready=true;},
+    enqueue(values){
+      if(!ready) return false;
+      for(const [key,value] of Object.entries(values)) pending.set(key,{value:JSON.parse(JSON.stringify(value)),revision:++revision});
+      status();Promise.resolve().then(drain);return true;
+    },
+    retry(){if(!ready)return;failure=null;status();return drain();},
+    flush:drain,
+    hasPending:()=>pending.size>0,
+    isReady:()=>ready
+  };
 }
 
 const {useState,useEffect,useRef}=React;
@@ -492,6 +579,8 @@ function App(){
   const [cursor,setCursor]=useState(today());
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
   const [loaded,setLoaded]=useState(false);
+  const [loadError,setLoadError]=useState(null);
+  const [saveError,setSaveError]=useState(null);
   const [modal,setModal]=useState(null);
   const [importModal,setImportModal]=useState(null); // Nuevo estado para la ventana de aprobación
   const [showNCF,setShowNCF]=useState(false);
@@ -515,7 +604,6 @@ function App(){
   const [weeklyStars,setWeeklyStars]=useState({});
   const [secondaryMissions,setSecondaryMissions]=useState([]);
   const secondaryRef=useRef([]);
-  const secondarySaveQueue=useRef(Promise.resolve());
   const [showSecondary,setShowSecondary]=useState(false);
   const [secondarySelection,setSecondarySelection]=useState([]);
   const [secondaryBatchFailures,setSecondaryBatchFailures]=useState([]);
@@ -525,7 +613,6 @@ function App(){
   const [completionFx,setCompletionFx]=useState(null);
   const [starFx,setStarFx]=useState(null);
   const starPanelRef=useRef(null);
-  const snapshotQueue=useRef(Promise.resolve());
   const [notifGranted,setNotifGranted]=useState(false);
   const [ncName,setNcName]=useState('');
   const [ncColor,setNcColor]=useState('#7F77DD');
@@ -535,10 +622,16 @@ function App(){
   const [dragEvt,setDragEvt]=useState(null);
   const [dragOver,setDragOver]=useState(null);
   const dragToken=useRef(0);
-  const saveTimer=useRef(null);
+  const persistence=useRef(null);
+  if(!persistence.current) persistence.current=createPersistenceController(saveToDB,state=>{
+    setSaveError(state.error);
+    if(state.error) setSync({dot:'#D85A30',msg:`Error al guardar ${state.error.key}. Cambios pendientes en este dispositivo.`});
+    else if(state.pending||state.running) setSync({dot:'#BA7517',msg:'Guardando...'});
+    else setSync({dot:'#1D9E75',msg:`Guardado ${new Date().toLocaleTimeString('es',{hour:'2-digit',minute:'2-digit'})}`});
+  });
 
-  useEffect(()=>{
-    (async()=>{
+  async function loadInitialData(){
+      setLoadError(null);setSync({dot:'#BA7517',msg:'Cargando...'});
       try{
         const data=await loadFromDB();
         setEvents(data.events);
@@ -551,40 +644,44 @@ function App(){
         const missions=reconcileSecondaryMissions(data.secondaryMissions||[],data.events);
         secondaryRef.current=missions;
         setSecondaryMissions(missions);
-        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions,data.events);
+        persistence.current.activate();
         setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
+        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions);
         scheduleEventsNotifications(data.events, data.cats);
+        setLoaded(true);
       }catch(e){
-        setSync({dot:'#D85A30',msg:'Error al cargar'});
+        reportPersistenceError('load',null,e);
+        setLoadError(e);setGoalsReady(false);
+        setSync({dot:'#D85A30',msg:'No se pudieron cargar tus datos.'});
       }
-      setLoaded(true);
       if('Notification' in window){
         setNotifGranted(Notification.permission==='granted');
       }
-    })();
+  }
+  useEffect(()=>{
+    loadInitialData();
+    const beforeUnload=e=>{if(persistence.current.hasPending()){e.preventDefault();e.returnValue='';}};
+    window.addEventListener('beforeunload',beforeUnload);
+    return()=>window.removeEventListener('beforeunload',beforeUnload);
   },[]);
 
   useEffect(()=>{
     if(!loaded) return;
     const rollover=()=>{
       const next=rolloverSecondaryMissions(secondaryRef.current);
-      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,events);
+      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next);
     };
     rollover();
     const timer=setInterval(rollover,60000);
     return()=>clearInterval(timer);
   },[loaded,events]);
 
-  function persistSecondary(next,evts=events){
+  function persistSecondary(next){
+    if(!persistence.current.isReady()) return;
     secondaryRef.current=next;
     setSecondaryMissions(next);
-    // Reutiliza key/value sin requerir índices nuevos; serializa misiones y eventos.
-    secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(async()=>{
-      await saveToDB('secondaryMissions',next);
-      await saveToDB('events',evts);
-    });
-    secondarySaveQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar acciones; vuelve a intentar'}));
+    persistence.current.enqueue({secondaryMissions:next});
   }
 
   // Detectar el cambio de semana incluso si la app permanece abierta.
@@ -601,10 +698,9 @@ function App(){
   },[goalsReady,currentGoalWeek]);
 
   function persistGoalSnapshots(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyGoalTargets(next);
-    // Serializar escrituras para que una edición rápida no restaure un snapshot viejo.
-    snapshotQueue.current=snapshotQueue.current.catch(()=>{}).then(()=>saveToDB('weeklyGoalTargets',next));
-    snapshotQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar historial de objetivos'}));
+    persistence.current.enqueue({weeklyGoalTargets:next});
   }
 
   function selectGoalsWeek(date){
@@ -626,27 +722,20 @@ function App(){
   },[]);
 
   function scheduleSave(evts,ct,goals=goalTargets){
-    if(saveTimer.current) clearTimeout(saveTimer.current);
-    setSync({dot:'#BA7517',msg:'Guardando...'});
-    saveTimer.current=setTimeout(async()=>{
-      try{
-        const latestEvents=eventsRef.current;
-        secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(()=>Promise.all([saveToDB('events',latestEvents),saveToDB('cats',ct),saveToDB('goals',goals)]));
-        await secondarySaveQueue.current;
-        const n=new Date();
-        setSync({dot:'#1D9E75',msg:`Guardado ${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}`});
-        scheduleEventsNotifications(latestEvents,ct);
-      }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar'});}
-    },800);
+    if(!persistence.current.isReady()) return;
+    eventsRef.current=evts;
+    persistence.current.enqueue({events:evts,cats:ct,goals});
+    scheduleEventsNotifications(evts,ct);
   }
 
   function setEvts(e){
-    eventsRef.current=e;
+    if(!persistence.current.isReady()) return;
+    const nextStars=updateStarsForChangedWeeks(eventsRef.current,e,weeklyStars);
     const next=reconcileSecondaryMissions(secondaryRef.current,e);
-    if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,e);
+    if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next);
     setEvents(e);
     scheduleSave(e,cats,goalTargets);
-    persistWeeklyStars(starsByWeek(e,weeklyStars));
+    if(JSON.stringify(nextStars)!==JSON.stringify(weeklyStars)) persistWeeklyStars(nextStars);
   }
   function setCatsS(c){setCats(c);scheduleSave(events,c,goalTargets);}
   function setGoalTarget(id,value){
@@ -658,22 +747,19 @@ function App(){
     scheduleSave(events,cats,next);
   }
 
-  async function persistWeeklyStars(next){
+  function persistWeeklyStars(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyStars(next);
-    try{await saveToDB('weeklyStars',next);}
-    catch(e){setSync({dot:'#D85A30',msg:'Error al guardar estrellas'});}
+    persistence.current.enqueue({weeklyStars:next});
   }
 
   function missionsForWeek(wk){
     return (Object.prototype.hasOwnProperty.call(weeklyMissions,wk)?weeklyMissions[wk]:(wk===weekKeyFromDate(today())?freshDefaultMissions():[])).map(m=>({...m}));
   }
-  async function persistWeeklyMissions(next){
+  function persistWeeklyMissions(next){
+    if(!persistence.current.isReady()) return;
     setWeeklyMissions(next);
-    setSync({dot:'#BA7517',msg:'Guardando metas...'});
-    try{
-      await saveToDB('weeklyMissions',next);
-      setSync({dot:'#1D9E75',msg:'Metas guardadas ✓'});
-    }catch(e){setSync({dot:'#D85A30',msg:'Error al guardar metas'});}
+    persistence.current.enqueue({weeklyMissions:next});
   }
   function updateMission(wk,id,patch){
     if(!goalsReady||wk!==weekKeyFromDate(today())) return;
@@ -724,7 +810,7 @@ function App(){
     setCatsS(next);
   }
 
-  const catById=id=>cats.find(c=>c.id===id)||cats[0];
+  const catById=id=>categoryForActivity(cats,id);
   const normalCats=cats.filter(c=>c.id!=='secondary');
   function editorStateForEvent(ev,dk,extra={}){
     const baseCat=catById(ev.cat);
@@ -741,12 +827,12 @@ function App(){
     const mission=secondaryRef.current.find(m=>m.id===id);
     if(!mission||!activeSecondary(mission)) return;
     const week=weekKeyFromDate(today()),now=new Date().toISOString();
-    const history=Object.fromEntries(Object.entries(mission.history).map(([wk,row])=>[wk,wk>=week?{...row,status:'cancelled',cancelledAt:now}:row]));
-    history[week]={text:mission.text,status:'cancelled',cancelledAt:now};
+    const history=Object.fromEntries(Object.entries(mission.history).map(([wk,row])=>[wk,wk>=week&&row.status!=='paused'?{...row,status:'cancelled',cancelledAt:now}:row]));
+    if(history[week]?.status!=='paused') history[week]={text:mission.text,status:'cancelled',cancelledAt:now};
     const next=secondaryRef.current.map(m=>m.id===id?{...m,status:'cancelled',cancelledAt:now,linkedEventId:null,scheduledDate:null,scheduledWeek:null,history}:m);
     const ne=cloneEventsMap(events);
     Object.keys(ne).forEach(dk=>{if(weekKeyFromDate(new Date(dk+'T12:00:00'))>=week) ne[dk]=ne[dk].filter(e=>e.secondaryMissionId!==id);});
-    persistSecondary(next,ne);setEvts(ne);
+    persistSecondary(next);setEvts(ne);
     setSecondaryMessage('Acción cancelada; se conserva en el historial.');
   }
   function saveSecondaryText(){
@@ -760,7 +846,7 @@ function App(){
     const next=secondaryRef.current.map(m=>m.id===secondaryEdit.id?{...m,text,normalizedText,history:Object.fromEntries(Object.entries(m.history).map(([wk,row])=>[wk,wk>=week?{...row,text}:row]))}:m);
     const ne=cloneEventsMap(events);
     Object.keys(ne).forEach(dk=>{if(weekKeyFromDate(new Date(dk+'T12:00:00'))>=week) ne[dk]=ne[dk].map(e=>e.secondaryMissionId===secondaryEdit.id?{...e,note:text}:e);});
-    persistSecondary(next,ne);setEvts(ne);setSecondaryEdit(null);setSecondaryMessage('Acción actualizada.');
+    persistSecondary(next);setEvts(ne);setSecondaryEdit(null);setSecondaryMessage('Acción actualizada.');
   }
   function scheduleSecondary(id){
     const next=rolloverSecondaryMissions(secondaryRef.current),mission=next.find(m=>m.id===id);
@@ -769,12 +855,12 @@ function App(){
     if(!slot){setSecondaryMessage('No hay un bloque libre de 1 hora esta semana. La acción sigue pendiente.');return;}
     const event=secondaryEvent(mission,slot.dk,slot.m);
     const ne={...events,[slot.dk]:[...(events[slot.dk]||[]),event]};
-    persistSecondary(reconcileSecondaryMissions(next,ne),ne);setEvts(ne);
+    persistSecondary(reconcileSecondaryMissions(next,ne));setEvts(ne);
     setSecondaryMessage(`◆ ${mission.text}: ${slot.dk} ${fmtH(event.h,event.half)}`);
   }
   function scheduleSelectedSecondary(){
     const result=scheduleSecondaryBatch(secondaryRef.current,events,secondarySelection);
-    persistSecondary(result.missions,result.events);setEvts(result.events);
+    persistSecondary(result.missions);setEvts(result.events);
     setSecondarySelection(result.failed.map(m=>m.id));
     setSecondaryBatchFailures(result.failed);
     setSecondaryMessage(`${result.scheduled.length} acciones programadas · ${result.failed.length} sin espacio`);
@@ -902,7 +988,7 @@ function App(){
       if(!slot){unscheduled.push(plannerFailure('secondary',m.text));return;}
       ne[slot.dk]=[...(ne[slot.dk]||[]),secondaryEvent(m,slot.dk,slot.m)];
     });
-    persistSecondary(reconcileSecondaryMissions(missions,ne),ne);
+    persistSecondary(reconcileSecondaryMissions(missions,ne));
     setEvts(ne);
     setView('week');
     setCursor(weekDays[0]);
@@ -1376,6 +1462,11 @@ function App(){
   const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto',WebkitOverflowScrolling:'touch'};
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
+  if(loadError) return React.createElement('div',{role:'alert',style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,padding:24,textAlign:'center',fontFamily:'system-ui'}},
+    React.createElement('div',null,loadError.code==='INCOMPLETE_HISTORY'?'No se pudo verificar el historial.':'No se pudieron cargar tus datos.'),
+    React.createElement('div',{style:{fontSize:12,color:'#666'}},'El guardado está bloqueado para proteger tu información.'),
+    React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
+  );
   if(!loaded) return React.createElement('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,color:'#666',fontSize:14}},
     React.createElement('div',{style:{width:28,height:28,border:'3px solid #eee',borderTopColor:'#1D9E75',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}),
     React.createElement('span',null,'Cargando tu cronograma...'),
@@ -1395,6 +1486,7 @@ function App(){
     React.createElement('div',{style:{display:'flex',alignItems:'center',gap:6,padding:'6px 12px',background:'#fff',borderRadius:8,border:'1px solid #e5e5e5',marginBottom:10,fontSize:11,color:'#666'}},
       React.createElement('div',{style:{width:7,height:7,borderRadius:'50%',background:sync.dot,flexShrink:0}}),
       React.createElement('span',{style:{flex:1}},sync.msg),
+      saveError&&React.createElement('button',{onClick:()=>persistence.current.retry(),style:{...btnBase,fontSize:11}},'Reintentar guardado'),
       React.createElement('button',{onClick:()=>setShowRepMgr(true),style:{...btnBase,fontSize:10,padding:'2px 8px',color:'#666'}},`↻ Repeticiones (${repIds.length})`)
     ),
 
@@ -1630,10 +1722,9 @@ function App(){
         React.createElement('div',{style:{fontSize:11,fontWeight:700,color:'#581c87',marginBottom:7}},'◆ Historial de acciones'),
         goalWeekNavigation(),
         (()=>{
-          const rows=secondaryMissions.map(m=>({id:m.id,...m.history[goalWeekKey]})).filter(row=>row.status);
-          const done=rows.filter(row=>row.status==='completed').length;
+          const {rows,done,total}=secondaryWeekSummary(secondaryMissions,goalWeekKey);
           return React.createElement(React.Fragment,null,
-            React.createElement('div',{style:{fontSize:11,fontWeight:600,marginBottom:6,color:'#6b21a8'}},`${compactWeekRange(goalWeekDays)} · ${done}/${rows.length} completadas`),
+            React.createElement('div',{style:{fontSize:11,fontWeight:600,marginBottom:6,color:'#6b21a8'}},`${compactWeekRange(goalWeekDays)} · ${total?`${done}/${total} completadas`:'Sin acciones evaluables'}`),
             !rows.length&&React.createElement('div',{style:{fontSize:10,color:'#777'}},'Sin acciones registradas para esta semana'),
             ...rows.map(row=>{
               const status=secondaryHistoryStatus(row.status);
@@ -1772,7 +1863,7 @@ function App(){
       React.createElement('div',{style:cardStyle},
         React.createElement('div',{style:{fontSize:14,fontWeight:500,marginBottom:10}},modal.evtId?'Editar actividad':'Nueva actividad'),
         React.createElement(Lbl,{t:'Categoria'}),
-        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:modal.secondaryMissionId?cats.filter(c=>c.id==='secondary').map(c=>[c.id,c.name]):normalCats.map(c=>[c.id,c.name])}),
+        React.createElement(Sel,{val:modal.cat,onChange:v=>setModal({...modal,cat:v,color:catById(v).color}),opts:modal.secondaryMissionId?cats.filter(c=>c.id==='secondary').map(c=>[c.id,c.name]):[...(!cats.some(c=>c.id===modal.cat)?[[modal.cat,catById(modal.cat).name]]:[]),...normalCats.map(c=>[c.id,c.name])]}),
         React.createElement(Lbl,{t:'Color'}),
         React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginTop:4}},
           React.createElement('div',{style:{width:26,height:26,borderRadius:'50%',background:modal.color,border:'1px solid #ccc',flexShrink:0}}),
@@ -1816,7 +1907,7 @@ function App(){
           React.createElement('button',{onClick:saveModal,style:{...btnBase,flex:1,padding:'7px 0',background:'#1a1a1a',color:'#fff',border:'none'}},'Guardar')
         ),
         
-        !modal.secondaryMissionId&&React.createElement('button',{
+        !modal.secondaryMissionId&&cats.some(c=>c.id===modal.cat)&&React.createElement('button',{
           onClick:()=>{
             if(window.confirm(`¿Estás seguro de que deseas eliminar la categoría "${catById(modal.cat).name}"?`)){
               deleteCat(modal.cat);
