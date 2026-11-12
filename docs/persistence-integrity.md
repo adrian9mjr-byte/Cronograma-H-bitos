@@ -28,7 +28,7 @@ No se pudo exportar ninguna fila, verificar el tipo de `id`, las columnas tempor
 
 ## Protección implementada
 
-La carga falla explícitamente ante errores, respuestas inválidas, JSON inválido o duplicados divergentes. Solo una lectura exitosa con cero filas crea defaults válidos. La UI bloquea el calendario y ofrece reintento mientras no haya una carga válida. El coordinador permanece inactivo y rechaza escrituras antes de esa carga.
+La carga falla explícitamente ante errores, respuestas inválidas, JSON inválido o duplicados divergentes. Para el usuario existente se exigen las siete claves históricas: ni cero filas ni una respuesta parcial verifican el historial. Las claves nuevas y opcionales no sustituyen ninguna de las siete. La UI bloquea el calendario y ofrece reintento mientras no haya una carga válida. El coordinador permanece inactivo y rechaza escrituras antes de esa carga.
 
 Los duplicados idénticos se colapsan sin depender del orden. Ante valores diferentes, se bloquea la carga: sin esquema/metadatos verificables sería inseguro inventar una regla de «última fila». La recuperación debe resolver primero el registro canónico con evidencia real.
 
@@ -49,4 +49,4 @@ El bloqueo por key en `saveToDB()` evita INSERTs concurrentes dentro de una inst
 
 ## Validación
 
-Las pruebas de persistencia simulan errores de SELECT/INSERT/UPDATE, duplicados, carga vacía válida, JSON corrupto, escrituras rápidas y recuperación. Las pruebas funcionales existentes cubren las misiones secundarias, su historial y planificación. Se comprobó en navegador con un adaptador local aislado: carga normal; fallo de red; SELECT fallido y reintento; escritura fallida y reintento; Organizar semana → guardar → recargar; edición de una tarjeta; meta manual; misión secundaria programada; y estrella de día completo conservada después de recargar. No se utiliza la UI de producción para no disparar sus escrituras automáticas.
+Las pruebas de persistencia simulan errores de SELECT/INSERT/UPDATE, duplicados, bloqueo ante cargas vacías o parciales, JSON corrupto, escrituras rápidas y recuperación. Las pruebas funcionales existentes cubren las misiones secundarias, su historial y planificación. Se comprobó en navegador con un adaptador local aislado: carga normal; fallo de red; SELECT fallido y reintento; escritura fallida y reintento; Organizar semana → guardar → recargar; edición de una tarjeta; meta manual; misión secundaria programada; y estrella de día completo conservada después de recargar. No se utiliza la UI de producción para no disparar sus escrituras automáticas.

@@ -58,6 +58,9 @@ function harness(rows=[],day='2026-11-05'){
   return {call:(f,...args)=>context[f](...args),rows,operations,failures,logs,context,render};
 }
 const row=(key,value,id=1)=>({id,user_id:'adrian_cronograma',key,value:JSON.stringify(value)});
+const historyRows=(overrides={})=>Object.entries({
+  events:{},cats:[],goals:{},weeklyMissions:{},weeklyGoalTargets:{'2026-11-02':{}},weeklyStars:{},secondaryMissions:[],...overrides
+}).map(([key,value],i)=>row(key,value,i+1));
 
 function nodes(node){
   if(Array.isArray(node))return node.flatMap(nodes);
@@ -87,7 +90,7 @@ test('three marked missions skip penalty; earlier failure and completed mission 
 });
 test('App initial load, history navigation and reload never write events during mission rollover',async()=>{
   const calendar={'2026-10-13':[{id:'historical',cat:'legacy-id',note:'Tarjeta histórica',done:true,h:8,dur:2}],'2026-11-05':[{id:'recent',cat:'other',note:'Tarjeta reciente',done:false,h:9,dur:2}]};
-  const rows=[row('events',calendar,1),row('secondaryMissions',[pausedMission('a','ACCION A')],2),row('weeklyGoalTargets',{[resume]:{}},3),row('weeklyStars',{'2026-10-12':['2026-10-13']},4),row('weeklyMissions',{'2026-10-12':[{id:'w',text:'Meta histórica',done:true}]},5)];
+  const rows=historyRows({events:calendar,secondaryMissions:[pausedMission('a','ACCION A')],weeklyStars:{'2026-10-12':['2026-10-13']},weeklyMissions:{'2026-10-12':[{id:'w',text:'Meta histórica',done:true}]}});
   const app=harness(rows);
   let tree=nodes(await app.render());
   const open=tree.find(n=>n.type==='button'&&content(n)==='Ver resumen ↗');
@@ -137,9 +140,29 @@ test('load errors/null response never become an empty successful calendar',async
   assert.equal(h.operations.filter(o=>o.op!=='select').length,0);
   assert.equal(h.logs[0][1].code,'42501');
 });
-test('successful zero-row load provides valid defaults',async()=>{
-  const result=await harness().call('loadFromDB');
+test('complete history loads without an optional barriletes row',async()=>{
+  const result=await harness(historyRows()).call('loadFromDB');
   assert.equal(Object.keys(result.events).length,0);assert.ok(result.weeklyGoalTargets);assert.equal(result.secondaryMissions.length,0);
+});
+test('zero rows, optional-only and every missing historical key fail closed in App',async()=>{
+  const history=historyRows(),optional=row('dailyBarriletes',{},8);
+  for(const rows of [[],[optional],...history.map(missing=>[optional,...history.filter(r=>r.key!==missing.key)])]){
+    const h=harness(rows);
+    await assert.rejects(h.call('loadFromDB'),e=>e.code==='INCOMPLETE_HISTORY');
+    const tree=nodes(await h.render());
+    assert.ok(tree.some(n=>content(n)==='No se pudo verificar el historial.'));
+    assert.ok(!tree.some(n=>content(n)==='Semana'));
+    assert.ok(h.operations.every(o=>o.op==='select'));
+  }
+});
+test('retry stays read-only until all historical rows are visible',async()=>{
+  const rows=historyRows(),last=rows.pop(),h=harness(rows);
+  const failed=nodes(await h.render()).find(n=>content(n)==='Reintentar carga');
+  assert.ok(failed);
+  rows.push(last);
+  failed.props.onClick();
+  assert.ok(nodes(await h.render()).some(n=>content(n)==='Semana'));
+  assert.ok(h.operations.every(o=>o.op==='select'));
 });
 test('null response is not interpreted as an empty table',async()=>{
   const h=harness();
@@ -149,11 +172,11 @@ test('null response is not interpreted as an empty table',async()=>{
 test('ambiguous duplicate values fail closed independent of row order; identical duplicates load',async()=>{
   const rows=[row('events',{},1),row('events',{'2026-10-27':[{id:'old',h:9,dur:2}]},2)];
   for(const values of [rows,[...rows].reverse()])await assert.rejects(harness(values).call('loadFromDB'),e=>e.code==='CONFLICTING_DUPLICATES');
-  assert.equal(Object.keys((await harness([row('events',{},1),row('events',{},2)]).call('loadFromDB')).events).length,0);
+  assert.equal(Object.keys((await harness([...historyRows(),row('events',{},8)]).call('loadFromDB')).events).length,0);
 });
 test('corrupt events and weekly targets fail closed instead of writing empty replacements',async()=>{
   for(const key of ['events','weeklyGoalTargets']){
-    const h=harness([{...row(key,{}),value:'invalid JSON'}]);
+    const h=harness(historyRows().map(r=>r.key===key?{...r,value:'invalid JSON'}:r));
     await assert.rejects(h.call('loadFromDB'),e=>e.code==='INVALID_STORED_DATA');
     assert.equal(h.operations.length,1);
   }

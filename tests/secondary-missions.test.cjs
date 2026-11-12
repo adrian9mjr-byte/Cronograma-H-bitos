@@ -203,12 +203,14 @@ test('archived cards cannot be dragged into a later week',()=>{
   const result=call('eventsAfterDrop',events,{type:'existing',dk:'2026-10-06',id:'old'},'2026-10-14',10,false);
   assert.equal(result.changed,false);assert.equal(result.events,events);
 });
-test('database loading accepts empty successful data and rejects errors or corrupt stored missions',async()=>{
-  for(const response of [{data:null,error:new Error('offline')},{data:[{key:'secondaryMissions',value:'corrupt'}],error:null}]){
+test('database loading requires verified historical keys and rejects corrupt stored missions',async()=>{
+  const rows=Object.entries({events:{},cats:[],goals:{},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]}).map(([key,value])=>({key,value:JSON.stringify(value)}));
+  const corrupt=rows.map(r=>r.key==='secondaryMissions'?{...r,value:'corrupt'}:r);
+  for(const response of [{data:null,error:new Error('offline')},{data:[],error:null},{data:corrupt,error:null}]){
     database.from=()=>({select(){return this},eq:async()=>response});
     await assert.rejects(call('loadFromDB'));
   }
-  database.from=()=>({select(){return this},eq:async()=>({data:[],error:null})});
+  database.from=()=>({select(){return this},eq:async()=>({data:rows,error:null})});
   const loaded=await call('loadFromDB');
   assert.equal(loaded.secondaryMissions.length,0);assert.equal(Object.keys(loaded.events).length,0);assert.ok(loaded.weeklyGoalTargets);
 });

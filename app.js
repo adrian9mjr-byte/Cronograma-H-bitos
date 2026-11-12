@@ -457,6 +457,7 @@ function scheduleEventsNotifications(events, cats){
   });
 }
 
+const REQUIRED_HISTORY_KEYS=['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'];
 async function loadFromDB(){
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
   if(error){reportPersistenceError('load',null,error);throw error;}
@@ -470,9 +471,15 @@ async function loadFromDB(){
     }
     canonical.set(row.key,row);
   }
+  const missing=REQUIRED_HISTORY_KEYS.filter(key=>!canonical.has(key));
+  if(missing.length){
+    const error=new Error(`No se pudo verificar el historial. Faltan claves: ${missing.join(', ')}.`);
+    error.code='INCOMPLETE_HISTORY';
+    throw error;
+  }
   const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
   [...canonical.values()].forEach(row=>{
-    if(['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'].includes(row.key)){
+    if(REQUIRED_HISTORY_KEYS.includes(row.key)){
       try{
         const value=JSON.parse(row.value);
         if(!value||typeof value!=='object'||Array.isArray(value)!==['cats','secondaryMissions'].includes(row.key)) throw new Error('Estructura inválida');
@@ -1456,7 +1463,7 @@ function App(){
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
   if(loadError) return React.createElement('div',{role:'alert',style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,padding:24,textAlign:'center',fontFamily:'system-ui'}},
-    React.createElement('div',null,'No se pudieron cargar tus datos.'),
+    React.createElement('div',null,loadError.code==='INCOMPLETE_HISTORY'?'No se pudo verificar el historial.':'No se pudieron cargar tus datos.'),
     React.createElement('div',{style:{fontSize:12,color:'#666'}},'El guardado está bloqueado para proteger tu información.'),
     React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
   );
