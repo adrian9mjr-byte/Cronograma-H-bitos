@@ -458,7 +458,13 @@ function scheduleEventsNotifications(events, cats){
 }
 
 const REQUIRED_HISTORY_KEYS=['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'];
-const BARRILETES_KEY='dailyBarriletes';
+let barrileteAuthClient;
+function getBarrileteAuth(){
+  if(!barrileteAuthClient) barrileteAuthClient=supabase.createClient(SUPABASE_URL,SUPABASE_KEY,{
+    auth:{storageKey:'cronograma-barriletes-auth',flowType:'pkce',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}
+  }).auth;
+  return barrileteAuthClient;
+}
 function validBarrileteDay(day){
   return typeof day==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day))&&new Date(day).toISOString().slice(0,10)===day;
 }
@@ -470,12 +476,27 @@ function parseBarrileteCount(value){
   const count=Number(value);
   return Number.isSafeInteger(count)?count:null;
 }
-function readBarriletes(rows){
-  if(!Array.isArray(rows)||rows.length>1) throw new Error('No hay una única versión verificable del registro.');
-  if(!rows.length) return {};
-  const records=JSON.parse(rows[0].value);
-  if(!records||typeof records!=='object'||Array.isArray(records)||!Object.entries(records).every(([day,record])=>validBarrileteDay(day)&&validBarrileteRecord(record))){
-    throw new Error('El registro de barriletes tiene un formato inválido.');
+async function barrileteRequest(session,action,body){
+  if(!session?.access_token) throw new Error('Identifícate de nuevo para continuar.');
+  // Fijar el token de esta petición evita reutilizar una edición de una cuenta con la sesión de otra.
+  const response=await fetch(SUPABASE_URL+'/rest/v1/rpc/'+action,{
+    method:'POST',headers:{apikey:SUPABASE_KEY,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  });
+  if(!response.ok) throw Object.assign(new Error('No se pudo acceder a barriletes.'),{status:response.status});
+  return response.json();
+}
+async function loadBarrileteWeek(session,start){
+  const rows=await barrileteRequest(session,'read_barriletes_week',{p_start:start});
+  if(!Array.isArray(rows)||rows.length>7) throw new Error('Respuesta semanal inválida.');
+  const records={};
+  const end=dateKey(addDays(new Date(start+'T12:00:00'),6));
+  for(const {day,long_count,short_count} of rows){
+    const record={long:long_count,short:short_count};
+    if(!validBarrileteDay(day)||day<start||day>end||Object.hasOwn(records,day)||!validBarrileteRecord(record)){
+      throw new Error('El registro de barriletes tiene un formato inválido.');
+    }
+    records[day]=record;
   }
   return records;
 }
@@ -497,9 +518,8 @@ async function loadFromDB(){
   if(error){reportPersistenceError('load',null,error);throw error;}
   if(!Array.isArray(data)) throw new Error('Respuesta de carga inválida; no se habilitará el guardado.');
   const canonical=new Map();
-  const barrileteRows=[];
   for(const row of data){
-    if(row.key===BARRILETES_KEY){barrileteRows.push(row);continue;}
+    if(row.key==='dailyBarriletes') continue; // Un legado opcional nunca bloquea el cronograma.
     // Sin metadatos de actualización verificados, no adivinar qué versión es la reciente.
     if(canonical.has(row.key)&&canonical.get(row.key).value!==row.value){
       const error=new Error(`Hay versiones diferentes de ${row.key}. Requieren revisión antes de guardar.`);
@@ -537,8 +557,6 @@ async function loadFromDB(){
   result.cats=mergeProjectCats(result.cats);
   result.goals={...DEFAULT_GOAL_TARGETS,...result.goals};
   result.weeklyMissions=result.weeklyMissions||{};
-  try{result.dailyBarriletes=readBarriletes(barrileteRows);}
-  catch(error){result.dailyBarriletes=null;reportPersistenceError('load',BARRILETES_KEY,error);}
   return result;
 }
 
@@ -571,18 +589,10 @@ function saveToDB(key,value){
   };
   return serializeDatabaseWrite(key,write);
 }
-function saveBarrileteDay(day,record){
-  return serializeDatabaseWrite(BARRILETES_KEY,async()=>{
-    try{
-      if(!validBarrileteDay(day)||!validBarrileteRecord(record)) throw new Error('Fecha o cantidades inválidas.');
-      // El servidor combina una fecha con el valor actual dentro de la transacción.
-      const {data,error}=await sb.rpc('save_barrilete_day',{
-        p_user_id:USER_ID,p_day:day,p_long:record.long,p_short:record.short
-      });
-      if(error) throw error;
-      if(data?.day!==day||data.long!==record.long||data.short!==record.short) throw new Error('El servidor no confirmó el registro.');
-    }catch(error){reportPersistenceError('save',BARRILETES_KEY,error);throw error;}
-  });
+async function saveBarrileteDay(session,day,record){
+  if(!validBarrileteDay(day)||!validBarrileteRecord(record)) throw new Error('Fecha o cantidades inválidas.');
+  const data=await barrileteRequest(session,'put_barrilete_day',{p_day:day,p_long:record.long,p_short:record.short});
+  if(data?.day!==day||data.long!==record.long||data.short!==record.short) throw new Error('El servidor no confirmó el registro.');
 }
 function createPersistenceController(write,onStatus=()=>{}){
   const pending=new Map();
@@ -629,15 +639,21 @@ function App(){
   const [cats,setCats]=useState(DEFAULT_CATS);
   const [events,setEvents]=useState({});
   const eventsRef=useRef({});
-  const [view,setView]=useState('day');
+  const [view,setView]=useState(()=>window.location&&new URLSearchParams(window.location.search).get('barriletes')==='acceso'?'week':'day');
   const [cursor,setCursor]=useState(today());
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
   const [loaded,setLoaded]=useState(false);
   const [loadError,setLoadError]=useState(null);
   const [saveError,setSaveError]=useState(null);
-  const [dailyBarriletes,setDailyBarriletes]=useState(null);
+  const [barrileteWeek,setBarrileteWeek]=useState(null);
   const [barrileteEditor,setBarrileteEditor]=useState(null);
   const [barrileteSync,setBarrileteSync]=useState(null);
+  const [barrileteIdentity,setBarrileteIdentity]=useState(undefined);
+  const [barrileteAccess,setBarrileteAccess]=useState('');
+  const [barrileteEmail,setBarrileteEmail]=useState(null);
+  const [barrileteAuthBusy,setBarrileteAuthBusy]=useState(false);
+  const [barrileteAuthMessage,setBarrileteAuthMessage]=useState('');
+  const [barrileteReload,setBarrileteReload]=useState(0);
   const [modal,setModal]=useState(null);
   const [importModal,setImportModal]=useState(null); // Nuevo estado para la ventana de aprobación
   const [showNCF,setShowNCF]=useState(false);
@@ -680,8 +696,10 @@ function App(){
   const [dragOver,setDragOver]=useState(null);
   const dragToken=useRef(0);
   const persistence=useRef(null);
-  const barriletePersistence=useRef(null);
-  if(!barriletePersistence.current) barriletePersistence.current=createPersistenceController(saveBarrileteDay,setBarrileteSync);
+  const barrileteSession=useRef(null);
+  const barrileteBinding=useRef(null);
+  const barrileteStart=dateKey(getWeekDays(cursor)[0]);
+  const dailyBarriletes=barrileteIdentity&&barrileteWeek?.owner===barrileteIdentity&&barrileteWeek.start===barrileteStart?barrileteWeek.records:null;
   if(!persistence.current) persistence.current=createPersistenceController(saveToDB,state=>{
     setSaveError(state.error);
     if(state.error) setSync({dot:'#D85A30',msg:`Error al guardar ${state.error.key}. Cambios pendientes en este dispositivo.`});
@@ -704,8 +722,6 @@ function App(){
         secondaryRef.current=missions;
         setSecondaryMissions(missions);
         persistence.current.activate();
-        setDailyBarriletes(data.dailyBarriletes);
-        if(data.dailyBarriletes!==null) barriletePersistence.current.activate();
         setGoalsReady(true);
         setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
         if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions);
@@ -722,26 +738,135 @@ function App(){
   }
   useEffect(()=>{
     loadInitialData();
-    const beforeUnload=e=>{if(persistence.current.hasPending()||barriletePersistence.current.hasPending()){e.preventDefault();e.returnValue='';}};
+    const beforeUnload=e=>{if(persistence.current.hasPending()||barrileteBinding.current?.queue.hasPending()){e.preventDefault();e.returnValue='';}};
     window.addEventListener('beforeunload',beforeUnload);
     return()=>window.removeEventListener('beforeunload',beforeUnload);
   },[]);
 
+  useEffect(()=>{
+    function onBarrileteAuthChange(event,session){
+      const uid=session?.user?.id||null;
+      const wasSignedIn=!!barrileteSession.current;
+      const previous=barrileteBinding.current;
+      barrileteSession.current=session;
+      if(uid&&previous?.owner!==uid){
+        const binding={owner:uid,revision:0,edits:new Map()};
+        binding.queue=createPersistenceController(async(day,edit)=>{
+          const now=barrileteSession.current;
+          if(now?.user?.id!==uid||barrileteBinding.current!==binding) throw new Error('Sesión de barriletes no disponible.');
+          await saveBarrileteDay(now,day,edit.record);
+          if(binding.edits.get(day)?.revision===edit.revision) binding.edits.get(day).pending=false;
+        },state=>{if(barrileteBinding.current===binding) setBarrileteSync(state);});
+        barrileteBinding.current=binding;
+        setBarrileteSync(null);
+      }
+      if(!uid||!wasSignedIn||previous?.owner!==uid){
+        setBarrileteEditor(null);setBarrileteWeek(null);
+      }
+      if(uid&&(event==='INITIAL_SESSION'||event==='SIGNED_IN')){
+        setBarrileteEmail(null);setBarrileteAuthMessage('');
+      }else if(!uid&&wasSignedIn){
+        setBarrileteAuthMessage('La sesión de barriletes terminó. Identifícate de nuevo para continuar.');
+      }
+      setBarrileteIdentity(uid);
+    }
+    let subscription;
+    try{
+      subscription=getBarrileteAuth().onAuthStateChange(onBarrileteAuthChange).data.subscription;
+    }catch{
+      setBarrileteIdentity(null);
+      setBarrileteAuthMessage('No se pudo iniciar la sesión de barriletes. Las actividades siguen disponibles.');
+    }
+    return()=>subscription?.unsubscribe();
+  },[]);
+
+  useEffect(()=>{
+    if(!loaded||view!=='week'||!barrileteIdentity) return;
+    const session=barrileteSession.current,binding=barrileteBinding.current;
+    if(session?.user?.id!==barrileteIdentity||binding?.owner!==barrileteIdentity) return;
+    let active=true;
+    const revision=binding.revision;
+    const pendingAtStart=new Set([...binding.edits].filter(([,edit])=>edit.pending).map(([day])=>day));
+    const end=dateKey(addDays(new Date(barrileteStart+'T12:00:00'),6));
+    setBarrileteAccess('');
+    loadBarrileteWeek(session,barrileteStart).then(records=>{
+      if(!active||barrileteBinding.current!==binding||barrileteSession.current?.user?.id!==binding.owner) return;
+      for(const [day,edit] of binding.edits){
+        const inWeek=day>=barrileteStart&&day<=end;
+        if(inWeek&&(edit.pending||pendingAtStart.has(day)||edit.revision>revision)) records[day]=edit.record;
+        else if(inWeek&&!edit.pending) binding.edits.delete(day);
+      }
+      binding.queue.activate();
+      setBarrileteWeek({owner:binding.owner,start:barrileteStart,records});
+    }).catch(error=>{
+      if(!active||barrileteBinding.current!==binding||barrileteSession.current?.user?.id!==binding.owner) return;
+      setBarrileteWeek(null);
+      setBarrileteAccess(error.status===403?'forbidden':error.status===401?'expired':'error');
+    });
+    return()=>{active=false;};
+  },[loaded,view,barrileteIdentity,barrileteStart,barrileteReload]);
+
+  async function sendBarrileteLink(e){
+    e.preventDefault();
+    setBarrileteAuthBusy(true);
+    try{
+      const redirect=new URL(window.location.pathname,window.location.origin);
+      redirect.searchParams.set('barriletes','acceso');
+      const {error}=await getBarrileteAuth().signInWithOtp({
+        email:barrileteEmail.trim(),options:{shouldCreateUser:false,emailRedirectTo:redirect.href}
+      });
+      if(error) throw error;
+      setBarrileteEmail(null);
+      setBarrileteAuthMessage('Abre el enlace del correo en este mismo navegador.');
+    }catch{
+      setBarrileteAuthMessage('No se pudo enviar el enlace. Comprueba el correo autorizado y reintenta.');
+    }finally{setBarrileteAuthBusy(false);}
+  }
+  async function logoutBarriletes(){
+    if(barrileteBinding.current?.queue.hasPending()){
+      setBarrileteAuthMessage('Guarda los cambios pendientes antes de cerrar sesión.');
+      return;
+    }
+    setBarrileteAuthBusy(true);
+    try{
+      const {error}=await getBarrileteAuth().signOut({scope:'local'});
+      if(error) throw error;
+      setBarrileteAuthMessage('');
+    }catch{setBarrileteAuthMessage('No se pudo confirmar el cierre de sesión. Reintenta.');}
+    finally{setBarrileteAuthBusy(false);}
+  }
+  async function recoverBarrileteSession(){
+    setBarrileteAuthBusy(true);
+    try{
+      const {data,error}=await getBarrileteAuth().refreshSession();
+      if(error||!data.session) throw error||new Error('Sesión no disponible');
+      setBarrileteReload(n=>n+1);
+    }catch(error){
+      if(!barrileteSession.current||error?.status===400||error?.status===401||error?.status===403){
+        setBarrileteEmail('');
+        setBarrileteAuthMessage('La sesión ya no es válida. Solicita un enlace nuevo.');
+      }else setBarrileteAuthMessage('No se pudo renovar la sesión. Comprueba la conexión y reintenta.');
+    }finally{setBarrileteAuthBusy(false);}
+  }
   function openBarrileteEditor(day){
-    if(!barriletePersistence.current.isReady()) return;
+    if(!dailyBarriletes||barrileteAuthBusy) return;
     const record=dailyBarriletes[day];
-    setBarrileteEditor({day,long:String(record?.long??0),short:String(record?.short??0),error:null});
+    setBarrileteEditor({day,owner:barrileteIdentity,long:String(record?.long??0),short:String(record?.short??0),error:null});
   }
   function submitBarrilete(e){
     e.preventDefault();
-    const {day,long,short}=barrileteEditor;
+    const {day,owner,long,short}=barrileteEditor;
     const record={long:parseBarrileteCount(long),short:parseBarrileteCount(short)};
     if(!validBarrileteRecord(record)){
       setBarrileteEditor({...barrileteEditor,error:'Introduce números enteros iguales o mayores que cero.'});
       return;
     }
-    if(!barriletePersistence.current.enqueue({[day]:record})) return;
-    setDailyBarriletes(previous=>({...previous,[day]:record}));
+    const binding=barrileteBinding.current;
+    if(!dailyBarriletes||barrileteAuthBusy||!binding?.queue.isReady()||binding.owner!==owner||barrileteSession.current?.user?.id!==owner) return;
+    const edit={record,pending:true,revision:++binding.revision};
+    binding.edits.set(day,edit);
+    binding.queue.enqueue({[day]:edit});
+    setBarrileteWeek(previous=>({...previous,records:{...previous.records,[day]:record}}));
     setBarrileteEditor(null);
   }
 
@@ -1736,7 +1861,13 @@ function App(){
             React.createElement('div',{style:{position:isMobile?'sticky':'static',left:12,width:'fit-content',maxWidth:isMobile?'min(100vw - 48px, 720px)':'100%'}},
               React.createElement('strong',null,'Barriletes de la semana'),
               dailyBarriletes===null
-                ?React.createElement('div',{role:'alert',style:{marginTop:4}},'No se pudo leer el registro de barriletes. No se guardarán cambios. Vuelve a cargar para intentar leerlo.')
+                ?React.createElement('div',{style:{marginTop:4}},
+                  barrileteIdentity===undefined?'Comprobando la sesión de barriletes…':
+                  !barrileteIdentity?'Identifícate para consultar y guardar tus barriletes.':
+                  barrileteAccess==='forbidden'?'Esta cuenta no tiene acceso a barriletes.':
+                  barrileteAccess==='expired'?'No se pudo validar la sesión de barriletes.':
+                  barrileteAccess==='error'?'No se pudieron leer los barriletes.':'Cargando barriletes…',
+                  barrileteAccess==='error'&&React.createElement('button',{type:'button',style:{...btnBase,marginLeft:6},onClick:()=>setBarrileteReload(n=>n+1)},'Reintentar lectura'))
                 :(()=>{
                   const totals=barrileteTotals(weekDays.map(dateKey),dailyBarriletes);
                   return React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:'4px 12px',marginTop:4}},
@@ -1744,10 +1875,18 @@ function App(){
                     React.createElement('span',null,`Cortos: ${totals.short}`),
                     React.createElement('strong',null,`Total: ${totals.total}`));
                 })(),
-              barrileteSync&&React.createElement('div',{role:'status',style:{marginTop:5,color:barrileteSync.error?'#b91c1c':barrileteSync.pending?'#92400e':'#047857'}},
+              barrileteIdentity===null&&barrileteEmail===null&&React.createElement('button',{type:'button',style:{...btnBase,marginTop:6},onClick:()=>setBarrileteEmail('')},'Identificarme para barriletes'),
+              barrileteEmail!==null&&React.createElement('form',{onSubmit:sendBarrileteLink,style:{display:'flex',flexWrap:'wrap',gap:6,marginTop:6}},
+                React.createElement('input',{'aria-label':'Correo de barriletes',type:'email',required:true,autoComplete:'email',value:barrileteEmail,onChange:e=>setBarrileteEmail(e.target.value),style:{...bi,maxWidth:240}}),
+                React.createElement('button',{type:'submit',style:btnBase,disabled:barrileteAuthBusy},'Enviar enlace de acceso'),
+                React.createElement('button',{type:'button',style:btnBase,disabled:barrileteAuthBusy,onClick:()=>setBarrileteEmail(null)},'Cancelar')),
+              barrileteIdentity&&React.createElement('button',{type:'button',style:{...btnBase,marginTop:6},disabled:barrileteAuthBusy,onClick:logoutBarriletes},'Cerrar sesión de barriletes'),
+              (barrileteAccess==='expired'||barrileteSync?.error?.error?.status===401)&&barrileteIdentity&&React.createElement('button',{type:'button',style:{...btnBase,marginLeft:6},disabled:barrileteAuthBusy,onClick:recoverBarrileteSession},'Renovar sesión'),
+              barrileteAuthMessage&&React.createElement('div',{role:'status',style:{marginTop:5}},barrileteAuthMessage),
+              barrileteIdentity&&barrileteSync&&React.createElement('div',{role:'status',style:{marginTop:5,color:barrileteSync.error?'#b91c1c':barrileteSync.pending?'#92400e':'#047857'}},
                 barrileteSync.error?'No se guardaron todos los barriletes. Los cambios siguen pendientes.'
                   :barrileteSync.pending?'Guardando barriletes…':'Barriletes guardados ✓',
-                barrileteSync.error&&React.createElement('button',{type:'button',style:{...btnBase,marginLeft:6},onClick:()=>barriletePersistence.current.retry()},'Reintentar barriletes')
+                barrileteSync.error&&dailyBarriletes&&React.createElement('button',{type:'button',style:{...btnBase,marginLeft:6},onClick:()=>barrileteBinding.current?.queue.retry()},'Reintentar barriletes')
               )
             )
           )
