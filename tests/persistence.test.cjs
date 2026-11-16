@@ -3,9 +3,47 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'../app.js'),'utf8');
-function harness(rows=[],day='2026-11-05'){
+function harness(rows=[],day='2026-11-05',options={}){
   const operations=[],logs=[];
   const failures={};
+  const store=options.authStore||{session:options.session??null};
+  const records=options.records||{};
+  const authCalls=[];
+  let listener;
+  function authEvent(event,session){store.session=session;listener?.(event,session);}
+  const auth={
+    onAuthStateChange(callback){listener=callback;callback('INITIAL_SESSION',store.session);return {data:{subscription:{unsubscribe(){listener=null;}}}};},
+    async signInWithOtp(args){authCalls.push({type:'otp',args});return {error:null};},
+    async signOut(args){authCalls.push({type:'logout',args});authEvent('SIGNED_OUT',null);return {error:null};},
+    async refreshSession(){
+      if(failures.refresh)return {data:{session:null},error:failures.refresh};
+      authEvent('TOKEN_REFRESHED',store.session);
+      return {data:{session:store.session},error:null};
+    }
+  };
+  const reply=(status,data)=>({ok:status===200,status,json:async()=>data});
+  async function fetch(url,request){
+    const action=url.split('/').at(-1),args=JSON.parse(request.body),token=request.headers.Authorization;
+    assert.equal(request.method,'POST');
+    if(action==='read_barriletes_week'){
+      operations.push({op:'select',action,args,token});
+      if(failures.kiteRead)return reply(failures.kiteRead);
+      if(!token.startsWith('Bearer fixture-alice'))return reply(403);
+      const end=new Date(args.p_start+'T00:00:00Z');
+      end.setUTCDate(end.getUTCDate()+6);
+      return reply(200,Object.entries(records).filter(([d])=>d>=args.p_start&&d<=end.toISOString().slice(0,10))
+        .map(([day,{long,short}])=>({day,long_count:long,short_count:short})));
+    }
+    assert.equal(action,'put_barrilete_day');
+    operations.push({op:'rpc',action,args,token});
+    if(options.beforeRpc) await options.beforeRpc({args,records});
+    if(failures.rpc)return reply(failures.rpc);
+    if(!token.startsWith('Bearer fixture-alice'))return reply(403);
+    if(options.rpcResponse)return reply(200,options.rpcResponse);
+    const {p_day,p_long,p_short}=args;
+    records[p_day]={long:p_long,short:p_short};
+    return reply(200,{day:p_day,long:p_long,short:p_short});
+  }
   const db={from(){
     let op='select',fields='*',payload,filters={};
     const query={
@@ -45,7 +83,8 @@ function harness(rows=[],day='2026-11-05'){
       }
     }
   };
-  const context=vm.createContext({Date:Clock,window:{innerWidth:1200,addEventListener(){},removeEventListener(){}},setInterval:()=>1,clearInterval(){},console:{error:(...args)=>logs.push(args)},supabase:{createClient:()=>db},React,ReactDOM:{createRoot:()=>({render(){}})},document:{getElementById(){}}});
+  const clients=[];
+  const context=vm.createContext({Date:Clock,URL,URLSearchParams,fetch,window:{innerWidth:options.width??1200,location:new URL(options.url||'http://localhost:8767/'),addEventListener(){},removeEventListener(){}},setInterval:()=>1,clearInterval(){},console:{error:(...args)=>logs.push(args)},supabase:{createClient:(_url,_key,config)=>{clients.push(config||null);return config?{auth}:db;}},React,ReactDOM:{createRoot:()=>({render(){}})},document:{getElementById(){}}});
   vm.runInContext(source,context);
   async function render(){
     let tree;
@@ -55,7 +94,7 @@ function harness(rows=[],day='2026-11-05'){
     }
     return tree;
   }
-  return {call:(f,...args)=>context[f](...args),rows,operations,failures,logs,context,render};
+  return {call:(f,...args)=>context[f](...args),rows,operations,failures,logs,context,render,records,authEvent,authCalls,clients};
 }
 const row=(key,value,id=1)=>({id,user_id:'adrian_cronograma',key,value:JSON.stringify(value)});
 const historyRows=(overrides={})=>Object.entries({
@@ -253,4 +292,247 @@ test('queue snapshots cannot mutate under a delayed write',async()=>{
   const seen=[],c=harness().call('createPersistenceController',async(k,v)=>seen.push(v));
   const events={day:[{id:'a'}]};c.activate();c.enqueue({events});events.day[0].id='mutated';
   await c.flush();assert.equal(seen[0].day[0].id,'a');
+});
+
+const kiteDay='2026-11-05',alice={user:{id:'alice'},access_token:'fixture-alice'};
+const kiteHarness=(opts={})=>harness(baseRows(),kiteDay,{session:alice,...opts});
+const longBarrileteHistory=()=>Object.fromEntries(Array.from({length:3653},(_,i)=>[
+  new Date(Date.UTC(2015,0,1+i)).toISOString().slice(0,10),{long:i%13,short:i%7}
+]));
+const baseRows=()=>Object.entries({
+  events:{'2026-10-14':[{id:'mock-event',cat:'mente',h:9,dur:2,done:true}]},
+  cats:[],goals:{},weeklyMissions:{'2026-10-12':[{id:'mock-goal',text:'Meta sintética',done:true}]},
+  weeklyGoalTargets:{[resume]:{}},weeklyStars:{'2026-10-12':['2026-10-14']},secondaryMissions:[]
+}).map(([k,v],i)=>row(k,v,i+1));
+const writes=h=>h.operations.filter(o=>o.op!=='select');
+const button=(tree,label)=>nodes(tree).find(n=>n.type==='button'&&content(n)===label);
+const dayButton=(tree,day)=>nodes(tree).find(n=>n.type==='button'&&n.props['aria-label']?.startsWith('Barriletes '+day+':'));
+const footer=tree=>nodes(tree).find(n=>n.props['aria-label']==='Registro semanal de barriletes');
+async function enterWeek(h){
+  button(await h.render(),'Semana').props.onClick();
+  return h.render();
+}
+async function editKites(h,tree,day,long,short){
+  dayButton(tree,day).props.onClick();
+  for(const [index,value] of [long,short].entries()){
+    const dialog=nodes(await h.render()).find(n=>n.props.role==='dialog');
+    nodes(dialog).filter(n=>n.type==='input')[index].props.onChange({target:{value}});
+  }
+  nodes(await h.render()).find(n=>n.props.role==='dialog').props.onSubmit({preventDefault(){}});
+  return h.render();
+}
+test('barriletes: formats long, short, both, zero and absent; exact daily and weekly totals',()=>{
+  const h=harness();
+  const variants=[[[1,0],'1 L'],[[0,1],'1 C'],[[3,1],'3 L · 1 C'],[[0,0],'0 L · 0 C']];
+  const values=Object.fromEntries(variants.map(([[long,short],label],i)=>{
+    assert.equal(h.call('barrileteLabel',{long,short}),label);
+    return ['2026-11-0'+(i+2),{long,short}];
+  }));
+  assert.equal(h.call('barrileteLabel'),'+ Registrar');
+  assert.equal(h.call('barrileteTotals',['2026-11-04'],values).total,4n);
+  const {long,short,total}=h.call('barrileteTotals',['2026-11-02','2026-11-03','2026-11-04','2026-11-05','2026-11-06','2026-11-07','2026-11-08'],values);
+  assert.deepEqual([long,short,total],[4n,2n,6n]);
+});
+test('barriletes: validation rejects decimals, negatives, empty, exponent and non-numbers',()=>{
+  const h=harness();
+  for(const value of ['-1','1.5','1,5','','1e2','NaN','abc','9007199254740992']) assert.equal(h.call('parseBarrileteCount',value),null);
+  assert.equal(h.call('parseBarrileteCount','0'),0);
+  assert.equal(h.call('parseBarrileteCount','12'),12);
+});
+test('barriletes: week footer only, explicit saves preserve all historical rows and reload',async()=>{
+  const rows=baseRows(),original=plain(rows),authStore={session:alice},records={},h=harness(rows,kiteDay,{authStore,records});
+  assert.equal(footer(await h.render()),undefined);
+  let tree=await enterWeek(h);
+  assert.equal(nodes(footer(tree)).filter(n=>n.props['aria-label']?.startsWith('Barriletes 20')).length,7);
+  assert.equal(content(dayButton(tree,kiteDay)),'+ Registrar');
+  button(tree,'→').props.onClick();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Total: 0'));
+  button(tree,'←').props.onClick();
+  button(await h.render(),'←').props.onClick();
+  tree=await h.render();
+  assert.equal(writes(h).length,0);
+  tree=await editKites(h,tree,'2026-10-29','-1','1.5');
+  assert.ok(nodes(tree).some(n=>n.props.role==='alert'&&content(n).includes('números enteros')));
+  assert.equal(writes(h).length,0);
+  button(tree,'Cancelar').props.onClick();
+  tree=await editKites(h,await h.render(),'2026-10-29','1','0');
+  assert.equal(content(dayButton(tree,'2026-10-29')),'1 L');
+  assert.equal(writes(h)[0].op,'rpc');
+  assert.equal(Object.keys(records).length,1);
+  tree=await editKites(h,tree,'2026-10-30','0','1');
+  assert.equal(content(dayButton(tree,'2026-10-30')),'1 C');
+  tree=await editKites(h,tree,'2026-10-29','3','1');
+  assert.equal(content(dayButton(tree,'2026-10-29')),'3 L · 1 C');
+  tree=await editKites(h,tree,'2026-10-31','0','0');
+  assert.equal(content(dayButton(tree,'2026-10-31')),'0 L · 0 C');
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Total: 5'));
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.ok(writes(h).every(o=>o.action==='put_barrilete_day'));
+  assert.deepEqual(rows,original);
+  const reload=harness(rows,kiteDay,{authStore,records});
+  tree=await enterWeek(reload);
+  button(tree,'←').props.onClick();
+  tree=await reload.render();
+  assert.equal(content(dayButton(tree,'2026-10-29')),'3 L · 1 C');
+  assert.equal(content(dayButton(tree,'2026-10-31')),'0 L · 0 C');
+  assert.equal(button(tree,'Identificarme para barriletes'),undefined);
+  assert.equal(writes(reload).length,0);
+});
+test('barriletes: another account is denied without blocking the historical calendar',async()=>{
+  const h=kiteHarness({session:{user:{id:'bob'},access_token:'fixture-bob'}});
+  const tree=await enterWeek(h);
+  assert.equal(dayButton(tree,kiteDay).props.disabled,true);
+  assert.ok(nodes(footer(tree)).some(n=>content(n).includes('Esta cuenta no tiene acceso')));
+  assert.ok(button(tree,'Ver resumen ↗'));
+  assert.equal(writes(h).length,0);
+});
+test('barriletes: first visit requests email on demand and never creates an account',async()=>{
+  const h=harness(baseRows());
+  let tree=await enterWeek(h);
+  assert.ok(button(tree,'Ver resumen ↗'));
+  assert.ok(button(tree,'Identificarme para barriletes'));
+  assert.ok(!nodes(tree).some(n=>n.props['aria-label']==='Correo de barriletes'));
+  assert.ok(!h.operations.some(o=>o.action));
+  button(tree,'Identificarme para barriletes').props.onClick();
+  tree=await h.render();
+  nodes(tree).find(n=>n.props['aria-label']==='Correo de barriletes').props.onChange({target:{value:'alice@example.test'}});
+  tree=await h.render();
+  await nodes(tree).find(n=>n.type==='form'&&button(n,'Enviar enlace de acceso')).props.onSubmit({preventDefault(){}});
+  assert.deepEqual(plain(h.authCalls[0].args),{email:'alice@example.test',options:{shouldCreateUser:false,emailRedirectTo:'http://localhost:8767/?barriletes=acceso'}});
+  assert.equal(h.clients[0],null);
+  assert.deepEqual(plain(h.clients[1].auth),{storageKey:'cronograma-barriletes-auth',flowType:'pkce',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true});
+  h.authEvent('SIGNED_IN',alice);
+  tree=await h.render();
+  assert.equal(content(dayButton(tree,kiteDay)),'+ Registrar');
+  assert.equal(button(tree,'Identificarme para barriletes'),undefined);
+});
+test('barriletes: refreshed token and local sign-out do not change the historical client',async()=>{
+  const h=kiteHarness(),snapshot=plain(h.rows);
+  let tree=await enterWeek(h);
+  h.authEvent('TOKEN_REFRESHED',{...alice,access_token:'fixture-alice-renewed'});
+  tree=await editKites(h,await h.render(),kiteDay,'1','2');
+  assert.equal(writes(h)[0].token,'Bearer fixture-alice-renewed');
+  await button(tree,'Cerrar sesión de barriletes').props.onClick();
+  tree=await h.render();
+  assert.deepEqual(plain(h.authCalls[0].args),{scope:'local'});
+  assert.ok(button(tree,'Identificarme para barriletes'));
+  assert.equal(content(dayButton(tree,kiteDay)),'—');
+  assert.ok(button(tree,'Ver resumen ↗'));
+  assert.deepEqual(h.rows,snapshot);
+});
+test('barriletes: revoked session hides records and pending edits never cross to another account',async()=>{
+  const h=kiteHarness();
+  h.failures.rpc=401;
+  let tree=await editKites(h,await enterWeek(h),kiteDay,'2','3');
+  assert.ok(button(tree,'Renovar sesión'));
+  h.failures.refresh={status:400};
+  await button(tree,'Renovar sesión').props.onClick();
+  tree=await h.render();
+  assert.ok(nodes(tree).some(n=>content(n).includes('La sesión ya no es válida')));
+  h.authEvent('SIGNED_OUT',null);
+  tree=await h.render();
+  assert.equal(content(dayButton(tree,kiteDay)),'—');
+  h.authEvent('SIGNED_IN',{user:{id:'bob'},access_token:'fixture-bob'});
+  tree=await h.render();
+  assert.equal(button(tree,'Reintentar barriletes'),undefined);
+  assert.equal(writes(h).length,1);
+  assert.deepEqual(h.records,{});
+});
+test('barriletes: same account can retry an unsaved edit after re-identifying',async()=>{
+  const h=kiteHarness();h.failures.rpc=401;
+  await editKites(h,await enterWeek(h),kiteDay,'1','3');
+  h.authEvent('SIGNED_OUT',null);
+  await h.render();
+  h.authEvent('SIGNED_IN',{...alice,access_token:'fixture-alice-new-session'});
+  delete h.failures.rpc;
+  const tree=await h.render();
+  assert.equal(content(dayButton(tree,kiteDay)),'1 L · 3 C');
+  button(tree,'Reintentar barriletes').props.onClick();
+  await h.render();
+  assert.deepEqual(h.records[kiteDay],{long:1,short:3});
+  assert.equal(writes(h).at(-1).token,'Bearer fixture-alice-new-session');
+});
+test('barriletes: failed initial load prevents the footer and any writes',async()=>{
+  const h=harness(baseRows());h.failures.select=new Error('offline');
+  const tree=await h.render();
+  assert.ok(button(tree,'Reintentar carga'));
+  assert.equal(footer(tree),undefined);
+  assert.equal(writes(h).length,0);
+});
+test('barriletes: failed RPC retains pending edit, retry confirms without replacing other dates',async()=>{
+  const records={'2026-10-29':{long:2,short:0}},h=kiteHarness({records});
+  let tree=await enterWeek(h);
+  const stored=plain(records);
+  h.failures.rpc=503;
+  tree=await editKites(h,tree,kiteDay,'1','2');
+  assert.equal(content(dayButton(tree,kiteDay)),'1 L · 2 C');
+  assert.deepEqual(records,stored);
+  assert.deepEqual(writes(h).map(o=>o.op),['rpc']);
+  assert.ok(nodes(footer(tree)).some(n=>content(n).includes('siguen pendientes')));
+  delete h.failures.rpc;
+  button(tree,'Reintentar barriletes').props.onClick();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.deepEqual(records,{'2026-10-29':{long:2,short:0},[kiteDay]:{long:1,short:2}});
+});
+test('barriletes: rapid edits and a concurrent remote edit preserve all days and confirm only at the end',async()=>{
+  let raced=false,release,start;
+  const gate=new Promise(r=>release=r),started=new Promise(r=>start=r);
+  const history=longBarrileteHistory();
+  const records=plain(history);
+  const h=kiteHarness({records,async beforeRpc(){
+    if(!raced){
+      raced=true;start();await gate;
+      records['2026-11-02']={long:7,short:1};
+    }
+  }});
+  let tree=await enterWeek(h);
+  tree=await editKites(h,tree,kiteDay,'1','0');
+  await started;
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Guardando barriletes…'));
+  tree=await editKites(h,tree,'2026-11-06','0','2');
+  tree=await editKites(h,tree,kiteDay,'3','1');
+  release();
+  tree=await h.render();
+  assert.ok(nodes(footer(tree)).some(n=>content(n)==='Barriletes guardados ✓'));
+  assert.deepEqual(records,{...history,'2026-11-02':{long:7,short:1},[kiteDay]:{long:3,short:1},'2026-11-06':{long:0,short:2}});
+  assert.ok(writes(h).every(o=>o.action==='put_barrilete_day'));
+});
+test('barriletes: ten years of history stay intact with a constant-size RPC request',async()=>{
+  const history=longBarrileteHistory();
+  assert.ok(encodeURIComponent(JSON.stringify(history)).length>100000);
+  const records=plain(history),app=kiteHarness({records});
+  const tree=await enterWeek(app);
+  await editKites(app,tree,kiteDay,'4','2');
+  const changes=writes(app);
+  assert.deepEqual(changes.map(o=>o.op),['rpc']);
+  assert.deepEqual(plain(changes[0].args),{p_day:kiteDay,p_long:4,p_short:2});
+  assert.ok(JSON.stringify(changes[0].args).length<150);
+  assert.deepEqual(records,{...history,[kiteDay]:{long:4,short:2}});
+});
+test('barriletes: missing RPC or mismatched confirmation never falls back to raw writes',async()=>{
+  const unavailable=kiteHarness();unavailable.failures.rpc=404;
+  await assert.rejects(unavailable.call('saveBarrileteDay',alice,kiteDay,{long:1,short:0}),e=>e.status===404);
+  const wrong=kiteHarness({rpcResponse:{day:kiteDay,long:2,short:0}});
+  await assert.rejects(wrong.call('saveBarrileteDay',alice,kiteDay,{long:1,short:0}),/no confirmó/);
+  for(const app of [unavailable,wrong]){
+    assert.deepEqual(app.operations.map(o=>o.op),['rpc']);
+    assert.equal(app.rows.length,7);
+  }
+});
+test('barriletes: footer follows both weekly grids inside the same mobile scroller',async()=>{
+  const h=harness(baseRows(),kiteDay,{width:390});
+  const tree=await enterWeek(h);
+  const region=footer(tree);
+  const wrapper=nodes(tree).find(n=>n.children.includes(region));
+  assert.equal(wrapper.props.style.overflowX,'auto');
+  const index=wrapper.children.indexOf(region);
+  const hours=wrapper.children[index-1],header=wrapper.children[index-2],counts=region.children[0];
+  assert.equal(counts.children.length,8);
+  for(const grid of [header,hours,counts]){
+    assert.equal(grid.props.style.gridTemplateColumns,'44px repeat(7,1fr)');
+    assert.equal(grid.props.style.minWidth,820);
+  }
+  assert.equal(counts.props.onDrop,undefined);
 });
