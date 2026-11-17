@@ -502,12 +502,16 @@ async function loadFromDB(){
 
 async function saveToDB(key,value){
   if(!historyVerified||!REQUIRED_HISTORY_KEYS.includes(key)) throw new Error('Historial sin verificar. Guardado bloqueado.');
-  const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).maybeSingle();
+  const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key);
   if(error) throw error;
-  if(!data||data.id==null) throw new Error('No se encontró la fila histórica. Guardado bloqueado.');
+  if(!Array.isArray(data)||data.length!==1||data[0]?.id==null) throw new Error('No se encontró una única fila histórica. Guardado bloqueado.');
+  const id=data[0].id;
   if(!historyVerified) throw new Error('Historial sin verificar. Guardado bloqueado.');
-  const result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key).eq('id',data.id);
+  const result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key).eq('id',id).select('id');
   if(result.error) throw result.error;
+  if(!Array.isArray(result.data)||result.data.length!==1||result.data[0]?.id!==id){
+    throw new Error('Supabase no confirmó la actualización de la fila histórica.');
+  }
 }
 
 const {useState,useEffect,useRef}=React;
@@ -532,8 +536,10 @@ function validBarrileteRecord(record){
 }
 function parseBarrileteBackup(text){
   const backup=JSON.parse(text);
-  const days=backup?.days;
-  if(backup?.format!=='cronograma-barriletes'||backup.version!==1||!days||typeof days!=='object'||Array.isArray(days)){
+  const legacy=backup?.format==='movimiento-real-barriletes-temporal';
+  const days=legacy&&!Object.hasOwn(backup,'days')?backup.records:backup?.days;
+  if((!legacy&&backup?.format!=='cronograma-barriletes')||backup?.version!==1||
+    (legacy&&Object.hasOwn(backup,'days')&&Object.hasOwn(backup,'records'))||!isHistoryObject(days)){
     throw new Error('Formato de respaldo no reconocido.');
   }
   for(const [day,record] of Object.entries(days)){
@@ -720,7 +726,7 @@ function App(){
       setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
       scheduleEventsNotifications(data.events, data.cats);
       setLoaded(true);
-      if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions)) persistSecondary(missions,data.events);
+      if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions)) persistSecondary(missions);
       if('Notification' in window){
         setNotifGranted(Notification.permission==='granted');
       }
@@ -738,20 +744,20 @@ function App(){
     if(!loaded) return;
     const rollover=()=>{
       const next=rolloverSecondaryMissions(secondaryRef.current);
-      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next,events);
+      if(JSON.stringify(next)!==JSON.stringify(secondaryRef.current)) persistSecondary(next);
     };
     rollover();
     const timer=setInterval(rollover,60000);
     return()=>clearInterval(timer);
-  },[loaded,events]);
+  },[loaded]);
 
-  function persistSecondary(next,evts=events){
+  function persistSecondary(next,evts){
     secondaryRef.current=next;
     setSecondaryMissions(next);
-    // Reutiliza key/value sin requerir índices nuevos; serializa misiones y eventos.
+    // Solo las acciones que editan tarjetas pasan un mapa de eventos.
     secondarySaveQueue.current=secondarySaveQueue.current.catch(()=>{}).then(async()=>{
       await saveToDB('secondaryMissions',next);
-      await saveToDB('events',evts);
+      if(evts!==undefined) await saveToDB('events',evts);
     });
     secondarySaveQueue.current.catch(()=>setSync({dot:'#D85A30',msg:'Error al guardar acciones; vuelve a intentar'}));
   }
@@ -1546,10 +1552,82 @@ function App(){
   const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto',WebkitOverflowScrolling:'touch'};
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
-  if(loadFailed) return React.createElement('div',{role:'alert',style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,padding:24,textAlign:'center',color:'#475569',fontSize:14}},
-    React.createElement('strong',null,'No se pudo verificar el historial.'),
-    React.createElement('div',null,'El guardado del cronograma está bloqueado para proteger tus datos.'),
-    React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
+  function renderWeekHeader(){
+    return React.createElement('div',{style:{...weekGrid,borderBottom:'1px solid #e5e5e5'}},
+      React.createElement('div',null),
+      ...weekDays.map(d=>{const isT=dateKey(d)===dateKey(td);return React.createElement('div',{key:dateKey(d),style:{padding:'5px 3px',textAlign:'center',fontSize:10,color:isT?'#1D9E75':'#999',borderLeft:'1px solid #e5e5e5'}},
+        React.createElement('div',null,DAYS_SH[d.getDay()]),
+        React.createElement('div',{style:{fontSize:13,fontWeight:500,background:isT?'#1D9E75':'transparent',color:isT?'#fff':'#1a1a1a',borderRadius:'50%',width:22,height:22,display:'flex',alignItems:'center',justifyContent:'center',margin:'2px auto 0'}},d.getDate())
+      );})
+    );
+  }
+
+  function renderBarriletePanel(){
+    return React.createElement('div',{role:'region','aria-label':'Registro semanal de barriletes'},
+      React.createElement('div',{style:{...weekGrid,background:'#f8fafc',borderTop:'1px solid #e5e5e5'}},
+        React.createElement('div',{title:'Barriletes largos y cortos',style:{alignSelf:'center',textAlign:'center',color:'#64748b',fontSize:10}},'L · C'),
+        ...weekDays.map(d=>{
+          const day=dateKey(d),record=dailyBarriletes?.[day],label=barrileteLabel(record);
+          return React.createElement('button',{key:day,type:'button',disabled:dailyBarriletes===null,onClick:()=>openBarrileteEditor(day),
+            'aria-label':`Barriletes ${day}: ${dailyBarriletes===null?'no disponibles':label}`,
+            style:{minHeight:44,minWidth:0,border:0,borderLeft:'1px solid #e5e5e5',background:'transparent',padding:'5px 3px',fontSize:11,fontWeight:record?700:400,color:record?'#0f766e':'#475569',overflowWrap:'anywhere',cursor:dailyBarriletes===null?'default':'pointer'}},
+            dailyBarriletes===null?'—':label);
+        })
+      ),
+      React.createElement('div',{style:{minWidth:weekGrid.minWidth,padding:'9px 12px',borderTop:'1px solid #e5e5e5',fontSize:12,color:'#334155'}},
+        React.createElement('div',{style:{position:isMobile?'sticky':'static',left:12,width:'fit-content',maxWidth:isMobile?'calc(100vw - 48px)':'100%'}},
+          React.createElement('strong',null,'Barriletes de la semana'),
+          dailyBarriletes===null
+            ?React.createElement('div',{role:'alert',style:{marginTop:4}},'No se pudieron leer los barriletes de este navegador. No se sobrescribieron los registros.')
+            :(()=>{
+              const {long,short,total}=barrileteTotals(weekDays.map(dateKey),dailyBarriletes);
+              return React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:'4px 12px',marginTop:4}},
+                React.createElement('span',null,`Largos: ${long}`),React.createElement('span',null,`Cortos: ${short}`),React.createElement('strong',null,`Total: ${total}`));
+            })(),
+          React.createElement('div',{style:{fontSize:11,color:'#475569',margin:'5px 0'}},'Solo en este navegador y dispositivo · No se sincroniza'),
+          React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
+            React.createElement('button',{type:'button',style:btnBase,disabled:dailyBarriletes===null,onClick:downloadBarriletes},'Exportar JSON'),
+            React.createElement('button',{type:'button',style:btnBase,disabled:dailyBarriletes===null||barrileteImporting,onClick:()=>barrileteFile.current?.click()},'Importar JSON'),
+            React.createElement('input',{ref:barrileteFile,type:'file',accept:'.json,application/json',hidden:true,onChange:uploadBarriletes})
+          ),
+          barrileteNotice&&React.createElement('div',{role:'status',style:{marginTop:5}},barrileteNotice)
+        )
+      )
+    );
+  }
+
+  function renderBarrileteEditor(){
+    return barrileteEditor&&React.createElement('div',{style:overlayStyle,onClick:e=>{if(e.target===e.currentTarget)setBarrileteEditor(null);}},
+      React.createElement('form',{style:cardStyle,role:'dialog','aria-modal':true,'aria-labelledby':'local-barriletes-title',onSubmit:submitBarrilete,onKeyDown:e=>{if(e.key==='Escape')setBarrileteEditor(null);}},
+        React.createElement('div',{id:'local-barriletes-title',style:{fontSize:15,fontWeight:700}},`Barriletes · ${barrileteEditor.day}`),
+        ...[['long','Largos (L)'],['short','Cortos (C)']].map(([key,label])=>React.createElement('label',{key,style:{display:'block',fontSize:12,marginTop:10}},label,
+          React.createElement('input',{type:'text',inputMode:'numeric',value:barrileteEditor[key],autoFocus:key==='long',style:{...bi,minHeight:42,marginTop:4},
+            onChange:e=>setBarrileteEditor({...barrileteEditor,[key]:e.target.value,error:''})})
+        )),
+        barrileteEditor.error&&React.createElement('div',{role:'alert',style:{color:'#b91c1c',fontSize:12,marginTop:8}},barrileteEditor.error),
+        React.createElement('div',{style:{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}},
+          React.createElement('button',{type:'button',style:btnBase,onClick:()=>setBarrileteEditor(null)},'Cancelar'),
+          React.createElement('button',{type:'submit',style:{...btnBase,background:'#0f766e',color:'#fff',minHeight:40}},'Guardar barriletes')
+        )
+      )
+    );
+  }
+
+  if(loadFailed) return React.createElement('main',{style:{maxWidth:900,margin:'0 auto',padding:12,color:'#475569',fontSize:14}},
+    React.createElement('div',{role:'alert',style:{marginBottom:16}},
+      React.createElement('strong',null,'No se pudo verificar el historial.'),
+      React.createElement('div',{style:{margin:'6px 0'}},'El guardado del cronograma está bloqueado. Puedes seguir registrando barriletes en este navegador.'),
+      React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
+    ),
+    React.createElement('div',{style:{display:'flex',alignItems:'center',gap:8,marginBottom:8}},
+      React.createElement('button',{onClick:()=>setCursor(addDays(cursor,-7)),style:btnBase,'aria-label':'Semana anterior'},'←'),
+      React.createElement('strong',null,compactWeekRange(weekDays)),
+      React.createElement('button',{onClick:()=>setCursor(addDays(cursor,7)),style:btnBase,'aria-label':'Semana siguiente'},'→')
+    ),
+    React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflowX:'auto'}},
+      renderWeekHeader(),renderBarriletePanel()
+    ),
+    renderBarrileteEditor()
   );
   if(!loaded) return React.createElement('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,color:'#666',fontSize:14}},
     React.createElement('div',{style:{width:28,height:28,border:'3px solid #eee',borderTopColor:'#1D9E75',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}),
@@ -1711,67 +1789,18 @@ function App(){
 
       React.createElement('div',{style:{background:'#fff',border:'1px solid #e5e5e5',borderRadius:12,overflowX:view==='week'&&isMobile?'auto':'hidden',overflowY:'hidden',WebkitOverflowScrolling:'touch',minWidth:0}},
         view==='week'&&isMobile&&React.createElement('div',{style:{position:'sticky',left:0,zIndex:5,padding:'6px 10px',fontSize:10,color:'#64748b',background:'#f8fafc',borderBottom:'1px solid #e5e7eb',width:'100%'}},'← Desliza horizontalmente para ver toda la semana →'),
-        view==='week'&&React.createElement('div',{style:{...weekGrid,borderBottom:'1px solid #e5e5e5'}},
-          React.createElement('div',null),
-          ...weekDays.map(d=>{const isT=dateKey(d)===dateKey(td);return React.createElement('div',{key:dateKey(d),style:{padding:'5px 3px',textAlign:'center',fontSize:10,color:isT?'#1D9E75':'#999',borderLeft:'1px solid #e5e5e5'}},
-            React.createElement('div',null,DAYS_SH[d.getDay()]),
-            React.createElement('div',{style:{fontSize:13,fontWeight:500,background:isT?'#1D9E75':'transparent',color:isT?'#fff':'#1a1a1a',borderRadius:'50%',width:22,height:22,display:'flex',alignItems:'center',justifyContent:'center',margin:'2px auto 0'}},d.getDate())
-          );})
-        ),
+        view==='week'&&renderWeekHeader(),
         React.createElement('div',{style:view==='week'?weekGrid:{display:'grid',gridTemplateColumns:'44px 1fr',minWidth:0}},
           React.createElement('div',{style:{display:'flex',flexDirection:'column'}},
             ...SLOTS.map((s,i)=>React.createElement('div',{key:i,style:{height:SH,display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'1px 4px 0 0',fontSize:9,color:'#bbb',flexShrink:0}},!s.half?fmtH(s.h,false):''))
           ),
           ...(view==='day'?[React.createElement(DayCol,{key:dateKey(cursor),dk:dateKey(cursor)})]:weekDays.map(d=>React.createElement(DayCol,{key:dateKey(d),dk:dateKey(d)})))
         ),
-        view==='week'&&React.createElement('div',{role:'region','aria-label':'Registro semanal de barriletes'},
-          React.createElement('div',{style:{...weekGrid,background:'#f8fafc',borderTop:'1px solid #e5e5e5'}},
-            React.createElement('div',{title:'Barriletes largos y cortos',style:{alignSelf:'center',textAlign:'center',color:'#64748b',fontSize:10}},'L · C'),
-            ...weekDays.map(d=>{
-              const day=dateKey(d),record=dailyBarriletes?.[day],label=barrileteLabel(record);
-              return React.createElement('button',{key:day,type:'button',disabled:dailyBarriletes===null,onClick:()=>openBarrileteEditor(day),
-                'aria-label':`Barriletes ${day}: ${dailyBarriletes===null?'no disponibles':label}`,
-                style:{minHeight:44,minWidth:0,border:0,borderLeft:'1px solid #e5e5e5',background:'transparent',padding:'5px 3px',fontSize:11,fontWeight:record?700:400,color:record?'#0f766e':'#475569',overflowWrap:'anywhere',cursor:dailyBarriletes===null?'default':'pointer'}},
-                dailyBarriletes===null?'—':label);
-            })
-          ),
-          React.createElement('div',{style:{minWidth:weekGrid.minWidth,padding:'9px 12px',borderTop:'1px solid #e5e5e5',fontSize:12,color:'#334155'}},
-            React.createElement('div',{style:{position:isMobile?'sticky':'static',left:12,width:'fit-content',maxWidth:isMobile?'calc(100vw - 48px)':'100%'}},
-              React.createElement('strong',null,'Barriletes de la semana'),
-              dailyBarriletes===null
-                ?React.createElement('div',{role:'alert',style:{marginTop:4}},'No se pudieron leer los barriletes de este navegador. No se sobrescribieron los registros.')
-                :(()=>{
-                  const {long,short,total}=barrileteTotals(weekDays.map(dateKey),dailyBarriletes);
-                  return React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:'4px 12px',marginTop:4}},
-                    React.createElement('span',null,`Largos: ${long}`),React.createElement('span',null,`Cortos: ${short}`),React.createElement('strong',null,`Total: ${total}`));
-                })(),
-              React.createElement('div',{style:{fontSize:11,color:'#475569',margin:'5px 0'}},'Solo en este navegador y dispositivo · No se sincroniza'),
-              React.createElement('div',{style:{display:'flex',flexWrap:'wrap',gap:6}},
-                React.createElement('button',{type:'button',style:btnBase,disabled:dailyBarriletes===null,onClick:downloadBarriletes},'Exportar JSON'),
-                React.createElement('button',{type:'button',style:btnBase,disabled:dailyBarriletes===null||barrileteImporting,onClick:()=>barrileteFile.current?.click()},'Importar JSON'),
-                React.createElement('input',{ref:barrileteFile,type:'file',accept:'.json,application/json',hidden:true,onChange:uploadBarriletes})
-              ),
-              barrileteNotice&&React.createElement('div',{role:'status',style:{marginTop:5}},barrileteNotice)
-            )
-          )
-        )
+        view==='week'&&renderBarriletePanel()
       )
     ),
 
-    barrileteEditor&&React.createElement('div',{style:overlayStyle,onClick:e=>{if(e.target===e.currentTarget)setBarrileteEditor(null);}},
-      React.createElement('form',{style:cardStyle,role:'dialog','aria-modal':true,'aria-labelledby':'local-barriletes-title',onSubmit:submitBarrilete,onKeyDown:e=>{if(e.key==='Escape')setBarrileteEditor(null);}},
-        React.createElement('div',{id:'local-barriletes-title',style:{fontSize:15,fontWeight:700}},`Barriletes · ${barrileteEditor.day}`),
-        ...[['long','Largos (L)'],['short','Cortos (C)']].map(([key,label])=>React.createElement('label',{key,style:{display:'block',fontSize:12,marginTop:10}},label,
-          React.createElement('input',{type:'text',inputMode:'numeric',value:barrileteEditor[key],autoFocus:key==='long',style:{...bi,minHeight:42,marginTop:4},
-            onChange:e=>setBarrileteEditor({...barrileteEditor,[key]:e.target.value,error:''})})
-        )),
-        barrileteEditor.error&&React.createElement('div',{role:'alert',style:{color:'#b91c1c',fontSize:12,marginTop:8}},barrileteEditor.error),
-        React.createElement('div',{style:{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}},
-          React.createElement('button',{type:'button',style:btnBase,onClick:()=>setBarrileteEditor(null)},'Cancelar'),
-          React.createElement('button',{type:'submit',style:{...btnBase,background:'#0f766e',color:'#fff',minHeight:40}},'Guardar barriletes')
-        )
-      )
-    ),
+    renderBarrileteEditor(),
 
     // MODAL DE IMPORTACIÓN (Vista Previa - Enfoque A)
     importModal&&React.createElement('div',{onClick:e=>{if(e.target===e.currentTarget)setImportModal(null);},style:overlayStyle},
