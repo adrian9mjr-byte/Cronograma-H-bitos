@@ -203,19 +203,117 @@ test('archived cards cannot be dragged into a later week',()=>{
   const result=call('eventsAfterDrop',events,{type:'existing',dk:'2026-10-06',id:'old'},'2026-10-14',10,false);
   assert.equal(result.changed,false);assert.equal(result.events,events);
 });
-test('database loading keeps safe fallback and tolerates missing or corrupt mission JSON',async()=>{
-  for(const response of [{data:null,error:{message:'offline'}},{data:[],error:null},{data:[{key:'secondaryMissions',value:'corrupt'}],error:null}]){
-    database.from=()=>({select(){return this},eq:async()=>response});
-    const loaded=await call('loadFromDB');
-    assert.equal(loaded.secondaryMissions.length,0);
-    assert.equal(Object.keys(loaded.events).length,0);
-    assert.ok(loaded.weeklyGoalTargets);
+const historicalRows=Object.entries({
+  events:{'2026-10-13':[{id:1,h:10,dur:2,cat:'mente',done:true}],'2026-10-14':[]},
+  cats:[],goals:{},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]
+}).map(([key,value])=>({key,value:JSON.stringify(value)}));
+
+test('a failed or incomplete historical read blocks all writes before a Supabase query',async()=>{
+  const cases=[
+    {data:historicalRows,error:new Error('offline')},
+    {data:null,error:null},
+    {data:[],error:null},
+    ...historicalRows.map(missing=>({data:[
+      ...historicalRows.filter(row=>row!==missing),{key:'dailyBarriletes',value:'{}'}
+    ],error:null}))
+  ];
+  for(const response of cases){
+    let queries=0;
+    database.from=()=>{queries++;return {select(){return this;},eq:async()=>response};};
+    await assert.rejects(call('loadFromDB'));
+    for(const {key} of historicalRows) await assert.rejects(call('saveToDB',key,{}),/Guardado bloqueado/);
+    assert.equal(queries,1);
   }
+  database.from=()=>({select(){return this;},eq:async()=>{throw new Error('network failure');}});
+  await assert.rejects(call('loadFromDB'),/network failure/);
+  await assert.rejects(call('saveToDB','events',{}),/Guardado bloqueado/);
 });
+
+test('malformed JSON, invalid nested history and conflicting duplicates block writes',async()=>{
+  const invalid=[
+    ...historicalRows.map(({key})=>({key,value:'{'})),
+    {key:'events',value:'{"2026-10-13":[null]}'},
+    {key:'weeklyMissions',value:'{"2026-10-12":{}}'},
+    {key:'weeklyGoalTargets',value:'{"2026-10-12":[]}'},
+    {key:'weeklyStars',value:'{"2026-10-12":3}'},
+    {key:'secondaryMissions',value:'[{"id":"fixture","text":"Acción ficticia","status":"invalid"}]'}
+  ];
+  for(const row of invalid){
+    database.from=()=>({select(){return this;},eq:async()=>({
+      data:historicalRows.map(original=>original.key===row.key?row:original),error:null
+    })});
+    await assert.rejects(call('loadFromDB'),new RegExp(row.key));
+    await assert.rejects(call('saveToDB','events',{}),/Guardado bloqueado/);
+  }
+  database.from=()=>({select(){return this;},eq:async()=>({
+    data:[...historicalRows,{key:'events',value:'{}'}],error:null
+  })});
+  await assert.rejects(call('loadFromDB'),/Versiones distintas de events/);
+  await assert.rejects(call('saveToDB','events',{}),/Guardado bloqueado/);
+});
+
+test('valid history preserves activities and explicit empty days',async()=>{
+  database.from=()=>({select(){return this;},eq:async()=>({
+    data:[...historicalRows,historicalRows[0],{key:'dailyBarriletes',value:'not historical JSON'}],error:null
+  })});
+  const loaded=await call('loadFromDB');
+  assert.equal(loaded.events['2026-10-13'][0].id,1);
+  assert.equal(loaded.events['2026-10-14'].length,0);
+});
+
+function mockHistoryWrite(lookup,response){
+  const operations=[];
+  database.from=()=> {
+    const query={filters:{},columns:null};
+    return {
+      select(columns){query.columns=columns;return this;},
+      eq(key,value){query.filters[key]=value;return this;},
+      insert(){assert.fail('writes must not recreate a missing historical key');},
+      update(payload){query.payload=payload;return this;},
+      then(resolve){operations.push(query);return Promise.resolve(query.payload?response:lookup).then(resolve);}
+    };
+  };
+  return operations;
+}
+
+test('missing and duplicate historical rows block UPDATE and are never recreated',async()=>{
+  database.from=()=>({select(){return this;},eq:async()=>({data:historicalRows,error:null})});
+  await call('loadFromDB');
+  for(const data of [[],null,[null],[{}],[{id:5},{id:9}],[{id:5},{id:5}]]){
+    const operations=mockHistoryWrite({data,error:null});
+    await assert.rejects(call('saveToDB','events',{}),/No se encontró una única fila histórica/);
+    assert.equal(operations.length,1);
+    assert.equal(operations[0].payload,undefined);
+  }
+  const operations=mockHistoryWrite({data:[{id:5}],error:null});
+  await assert.rejects(call('saveToDB','dailyBarriletes',{}),/Guardado bloqueado/);
+  assert.equal(operations.length,0);
+});
+
+test('updates succeed only when Supabase confirms exactly the expected row',async()=>{
+  database.from=()=>({select(){return this;},eq:async()=>({data:historicalRows,error:null})});
+  await call('loadFromDB');
+  const lookup={data:[{id:5}],error:null};
+  for(const data of [[],null,undefined,{id:5},[{id:9}],[{id:5},{id:5}],[null]]){
+    const statements=mockHistoryWrite(lookup,{data,error:null});
+    await assert.rejects(call('saveToDB','events',{}),/no confirmó la actualización/);
+    assert.equal(statements.length,2);
+    assert.equal(statements[1].columns,'id');
+    assert.deepEqual(statements[1].filters,{user_id:'adrian_cronograma',key:'events',id:5});
+  }
+  const statements=mockHistoryWrite(lookup,{data:[{id:5}],error:null});
+  await call('saveToDB','events',{});
+  assert.equal(statements.length,2);
+  assert.equal(statements[1].payload.value,'{}');
+});
+
 test('persistence propagates query and write errors instead of reporting false success',async()=>{
-  database.from=()=>({select(){return this},eq(){return this},maybeSingle:async()=>({data:null,error:new Error('offline')})});
+  database.from=()=>({select(){return this;},eq:async()=>({data:historicalRows,error:null})});
+  await call('loadFromDB');
+  const statements=mockHistoryWrite({data:null,error:new Error('offline')});
   await assert.rejects(call('saveToDB','secondaryMissions',[]),/offline/);
-  database.from=()=>({select(){return this},eq(){return this},maybeSingle:async()=>({data:null,error:null}),insert:async()=>({error:new Error('write failed')})});
+  assert.equal(statements.length,1);
+  mockHistoryWrite({data:[{id:5}],error:null},{data:null,error:new Error('write failed')});
   await assert.rejects(call('saveToDB','secondaryMissions',[]),/write failed/);
 });
 
