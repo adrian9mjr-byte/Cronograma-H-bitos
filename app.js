@@ -257,6 +257,9 @@ function weeklyGoalStats(events,days,targets){
 
 function today(){let d=new Date();d.setHours(0,0,0,0);return d;}
 function dateKey(d){ return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function isDateKey(day){
+  return typeof day==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day))&&new Date(day).toISOString().slice(0,10)===day;
+}
 function addDays(d,n){let r=new Date(d);r.setDate(r.getDate()+n);return r;}
 function getWeekDays(d){let s=new Date(d);let day=s.getDay();let diff=day===0?-6:1-day;s.setDate(s.getDate()+diff);return Array.from({length:7},(_,i)=>addDays(s,i));}
 function fmtH(h,half){let ap=h>=12?'pm':'am';let hh=h>12?h-12:(h===0?12:h);return hh+(half?':30':':00')+ap;}
@@ -441,35 +444,69 @@ function scheduleEventsNotifications(events, cats){
   });
 }
 
+const REQUIRED_HISTORY_KEYS=['events','cats','goals','weeklyMissions','weeklyGoalTargets','weeklyStars','secondaryMissions'];
+const isHistoryObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+let historyVerified=false;
+
+function validHistoryValue(key,value){
+  if(key==='cats') return Array.isArray(value)&&value.every(cat=>isHistoryObject(cat)&&typeof cat.id==='string'&&cat.id);
+  if(key==='secondaryMissions') return Array.isArray(value)&&value.every(m=>isHistoryObject(m)&&
+    (m.history===undefined||(isHistoryObject(m.history)&&Object.values(m.history).every(isHistoryObject))));
+  if(!isHistoryObject(value)) return false;
+  if(key==='goals') return Object.values(value).every(Number.isFinite);
+  if(!Object.keys(value).every(isDateKey)) return false;
+  const values=Object.values(value);
+  if(key==='events') return values.every(list=>Array.isArray(list)&&list.every(e=>isHistoryObject(e)&&
+    (typeof e.id==='string'||Number.isFinite(e.id))&&Number.isInteger(e.h)&&e.h>=0&&e.h<24));
+  if(key==='weeklyMissions') return values.every(list=>Array.isArray(list)&&list.every(m=>isHistoryObject(m)&&
+    (typeof m.id==='string'||Number.isFinite(m.id))&&typeof m.text==='string'));
+  if(key==='weeklyGoalTargets') return values.every(targets=>isHistoryObject(targets)&&Object.values(targets).every(Number.isFinite));
+  return values.every(list=>Array.isArray(list)&&list.every(isDateKey)); // weeklyStars
+}
+
 async function loadFromDB(){
+  historyVerified=false;
   const{data,error}=await sb.from('cronograma').select('key,value').eq('user_id',USER_ID);
-  if(error||!data) return{events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
-  const result={events:{},cats:mergeProjectCats(DEFAULT_CATS),goals:{...DEFAULT_GOAL_TARGETS},weeklyMissions:{},weeklyGoalTargets:{},weeklyStars:{},secondaryMissions:[]};
-  data.forEach(row=>{
-    if(row.key==='events') try{result.events=JSON.parse(row.value);}catch(e){}
-    if(row.key==='cats') try{result.cats=mergeProjectCats(JSON.parse(row.value));}catch(e){}
-    if(row.key==='goals') try{result.goals={...DEFAULT_GOAL_TARGETS,...JSON.parse(row.value)};}catch(e){}
-    if(row.key==='weeklyMissions') try{result.weeklyMissions=JSON.parse(row.value)||{};}catch(e){}
-    if(row.key==='weeklyGoalTargets') try{result.weeklyGoalTargets=JSON.parse(row.value)||{};}catch(e){}
-    if(row.key==='weeklyStars') try{result.weeklyStars=JSON.parse(row.value)||{};}catch(e){}
-    if(row.key==='secondaryMissions') result.secondaryMissions=parseSecondaryMissions(row.value);
-  });
+  if(error) throw error;
+  if(!Array.isArray(data)) throw new Error('Respuesta de carga inválida.');
+  const rows=new Map();
+  for(const row of data){
+    if(!row||typeof row.key!=='string') throw new Error('Fila histórica inválida.');
+    if(!REQUIRED_HISTORY_KEYS.includes(row.key)) continue;
+    if(rows.has(row.key)&&rows.get(row.key)!==row.value) throw new Error(`Versiones distintas de ${row.key}.`);
+    rows.set(row.key,row.value);
+  }
+  const missing=REQUIRED_HISTORY_KEYS.filter(key=>!rows.has(key));
+  if(missing.length) throw new Error(`Faltan claves históricas: ${missing.join(', ')}.`);
+
+  const result={};
+  for(const [key,raw] of rows){
+    try{
+      if(typeof raw!=='string') throw new Error('Valor inválido.');
+      const value=JSON.parse(raw);
+      if(!validHistoryValue(key,value)) throw new Error('Estructura inválida.');
+      result[key]=value;
+    }catch{
+      throw new Error(`Datos inválidos en ${key}.`);
+    }
+  }
+  const missions=parseSecondaryMissions(result.secondaryMissions);
+  if(missions.length!==result.secondaryMissions.length) throw new Error('Datos inválidos en secondaryMissions.');
+  result.secondaryMissions=missions;
   result.events=migrateLegacyEvents(result.events);
   result.cats=mergeProjectCats(result.cats);
   result.goals={...DEFAULT_GOAL_TARGETS,...result.goals};
-  result.weeklyMissions=result.weeklyMissions||{};
+  historyVerified=true;
   return result;
 }
 
 async function saveToDB(key,value){
+  if(!historyVerified||!REQUIRED_HISTORY_KEYS.includes(key)) throw new Error('Historial sin verificar. Guardado bloqueado.');
   const{data,error}=await sb.from('cronograma').select('id').eq('user_id',USER_ID).eq('key',key).maybeSingle();
   if(error) throw error;
-  let result;
-  if(data){
-    result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key);
-  } else {
-    result=await sb.from('cronograma').insert({user_id:USER_ID,key,value:JSON.stringify(value)});
-  }
+  if(!data||data.id==null) throw new Error('No se encontró la fila histórica. Guardado bloqueado.');
+  if(!historyVerified) throw new Error('Historial sin verificar. Guardado bloqueado.');
+  const result=await sb.from('cronograma').update({value:JSON.stringify(value)}).eq('user_id',USER_ID).eq('key',key).eq('id',data.id);
   if(result.error) throw result.error;
 }
 
@@ -485,9 +522,6 @@ const RepGrid=({days,toggle})=>React.createElement('div',{style:{display:'grid',
 );
 
 const LOCAL_BARRILETES_KEY='cronograma:barriletes:v1';
-function validBarrileteDate(day){
-  return /^\d{4}-\d{2}-\d{2}$/.test(day)&&Number.isFinite(Date.parse(day))&&new Date(day).toISOString().slice(0,10)===day;
-}
 function parseBarrileteCount(value){
   const n=/^\d+$/.test(value)?Number(value):NaN;
   return Number.isSafeInteger(n)?n:null;
@@ -503,7 +537,7 @@ function parseBarrileteBackup(text){
     throw new Error('Formato de respaldo no reconocido.');
   }
   for(const [day,record] of Object.entries(days)){
-    if(!validBarrileteDate(day)||!validBarrileteRecord(record)){
+    if(!isDateKey(day)||!validBarrileteRecord(record)){
       throw new Error('El respaldo contiene una fecha o cantidad inválida.');
     }
   }
@@ -517,7 +551,7 @@ function readLocalBarriletes(storage){
   return value===null?{}:parseBarrileteBackup(value);
 }
 function saveLocalBarrileteDay(storage,day,record){
-  if(!validBarrileteDate(day)||!validBarrileteRecord(record)) throw new Error('Fecha o cantidades inválidas.');
+  if(!isDateKey(day)||!validBarrileteRecord(record)) throw new Error('Fecha o cantidades inválidas.');
   const days={...readLocalBarriletes(storage),[day]:record};
   storage.setItem(LOCAL_BARRILETES_KEY,serializeBarriletes(days));
   return days;
@@ -565,6 +599,7 @@ function App(){
   const [cursor,setCursor]=useState(today());
   const [sync,setSync]=useState({dot:'#BA7517',msg:'Cargando...'});
   const [loaded,setLoaded]=useState(false);
+  const [loadFailed,setLoadFailed]=useState(false);
   const [dailyBarriletes,setDailyBarriletes]=useState(()=>{
     try{return readLocalBarriletes(window.localStorage);}catch{return null;}
   });
@@ -667,33 +702,37 @@ function App(){
   const dragToken=useRef(0);
   const saveTimer=useRef(null);
 
-  useEffect(()=>{
-    (async()=>{
-      try{
-        const data=await loadFromDB();
-        setEvents(data.events);
-        eventsRef.current=data.events;
-        setCats(data.cats);
-        setGoalTargets(data.goals||{...DEFAULT_GOAL_TARGETS});
-        setWeeklyMissions(data.weeklyMissions||{});
-        setWeeklyGoalTargets(data.weeklyGoalTargets||{});
-        setWeeklyStars(data.weeklyStars||{});
-        const missions=reconcileSecondaryMissions(data.secondaryMissions||[],data.events);
-        secondaryRef.current=missions;
-        setSecondaryMissions(missions);
-        if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions||[])) persistSecondary(missions,data.events);
-        setGoalsReady(true);
-        setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
-        scheduleEventsNotifications(data.events, data.cats);
-      }catch(e){
-        setSync({dot:'#D85A30',msg:'Error al cargar'});
-      }
+  async function loadInitialData(){
+    setLoadFailed(false);
+    try{
+      const data=await loadFromDB();
+      const missions=reconcileSecondaryMissions(data.secondaryMissions,data.events);
+      setEvents(data.events);
+      eventsRef.current=data.events;
+      setCats(data.cats);
+      setGoalTargets(data.goals);
+      setWeeklyMissions(data.weeklyMissions);
+      setWeeklyGoalTargets(data.weeklyGoalTargets);
+      setWeeklyStars(data.weeklyStars);
+      secondaryRef.current=missions;
+      setSecondaryMissions(missions);
+      setGoalsReady(true);
+      setSync({dot:'#1D9E75',msg:'Datos cargados ✓'});
+      scheduleEventsNotifications(data.events, data.cats);
       setLoaded(true);
+      if(JSON.stringify(missions)!==JSON.stringify(data.secondaryMissions)) persistSecondary(missions,data.events);
       if('Notification' in window){
         setNotifGranted(Notification.permission==='granted');
       }
-    })();
-  },[]);
+    }catch{
+      historyVerified=false;
+      setLoaded(false);
+      setGoalsReady(false);
+      setLoadFailed(true);
+    }
+  }
+
+  useEffect(()=>{loadInitialData();},[]);
 
   useEffect(()=>{
     if(!loaded) return;
@@ -1507,6 +1546,11 @@ function App(){
   const cardStyle={background:'#fff',borderRadius:12,border:'1px solid #e5e5e5',padding:16,width:'100%',maxWidth:320,maxHeight:'85vh',overflowY:'auto',WebkitOverflowScrolling:'touch'};
   const btnBase={fontFamily:'system-ui',border:'1px solid #e5e5e5',background:'transparent',color:'#1a1a1a',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontSize:12};
 
+  if(loadFailed) return React.createElement('div',{role:'alert',style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,padding:24,textAlign:'center',color:'#475569',fontSize:14}},
+    React.createElement('strong',null,'No se pudo verificar el historial.'),
+    React.createElement('div',null,'El guardado del cronograma está bloqueado para proteger tus datos.'),
+    React.createElement('button',{onClick:loadInitialData,style:btnBase},'Reintentar carga')
+  );
   if(!loaded) return React.createElement('div',{style:{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',minHeight:'100vh',gap:12,color:'#666',fontSize:14}},
     React.createElement('div',{style:{width:28,height:28,border:'3px solid #eee',borderTopColor:'#1D9E75',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}),
     React.createElement('span',null,'Cargando tu cronograma...'),

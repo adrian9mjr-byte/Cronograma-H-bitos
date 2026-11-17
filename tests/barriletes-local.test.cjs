@@ -10,8 +10,8 @@ function memory(){
   const entries=new Map([['unrelated','unchanged']]);
   return {entries,getItem:k=>entries.get(k)??null,setItem:(k,v)=>entries.set(k,v)};
 }
-function app(storage=memory(),width=1200){
-  const operations=[],slots=[],listeners={},downloads=[];
+function app(storage=memory(),width=1200,readHistory=data=>({data,error:null})){
+  const operations=[],writes=[],slots=[],listeners={},downloads=[];
   let cursor=0,effects=[];
   class Clock extends Date{constructor(...args){super(...(args.length?args:[day+'T12:00:00']));}}
   const React={
@@ -33,21 +33,35 @@ function app(storage=memory(),width=1200){
   };
   const history={
     events:{[day]:[{id:'fixture-card',cat:'mente',note:'Actividad ficticia',h:22,half:true,dur:1,done:true}]},
-    cats:[],goals:{},weeklyMissions:{},weeklyGoalTargets:{[day]:{}},weeklyStars:{[day]:[day]},secondaryMissions:[]
+    cats:[],goals:{},weeklyMissions:{[day]:[{id:'goal-fixture',text:'Meta ficticia',done:false}]},
+    weeklyGoalTargets:{[day]:{}},weeklyStars:{[day]:[day]},secondaryMissions:[]
   };
-  const rows=Object.entries(history).map(([key,value])=>({key,value:JSON.stringify(value)}));
+  const rows=Object.entries(history).map(([key,value],id)=>({id,key,value:JSON.stringify(value)}));
   const database={from(table){
     operations.push(table);
-    return {select(){return this;},eq:async()=>({data:rows,error:null})};
+    const filters={};
+    return {
+      select(){return this;},
+      eq(key,value){filters[key]=value;return this;},
+      then(resolve,reject){return Promise.resolve().then(()=>readHistory(rows)).then(resolve,reject);},
+      async maybeSingle(){return {data:rows.find(row=>row.key===filters.key),error:null};},
+      update(payload){return {eq(key,value){
+        filters[key]=value;
+        if(key!=='id')return this;
+        const row=rows.find(row=>row.id===value&&row.key===filters.key);
+        if(row){row.value=payload.value;writes.push({key:row.key,value:JSON.parse(payload.value)});}
+        return Promise.resolve({error:null});
+      }};}
+    };
   }};
   const context=vm.createContext({Date:Clock,React,Blob,
     URL:{createObjectURL:blob=>{downloads.push(blob);return 'blob:fixture';},revokeObjectURL(){}},
     window:{localStorage:storage,innerWidth:width,addEventListener:(name,fn)=>listeners[name]=fn,removeEventListener(){}},
     document:{getElementById(){},createElement:()=>({click(){},remove(){}}),body:{appendChild(){}}},
-    setInterval:()=>1,clearInterval(){},setTimeout:()=>1,clearTimeout(){},
+    setInterval:()=>1,clearInterval(){},setTimeout:(fn,delay)=>delay===800?setImmediate(fn):1,clearTimeout:clearImmediate,
     supabase:{createClient:()=>database},ReactDOM:{createRoot:()=>({render(){}})}});
   vm.runInContext(source,context);
-  return {call:(fn,...args)=>context[fn](...args),storage,operations,downloads,listeners,async render(){
+  return {call:(fn,...args)=>context[fn](...args),storage,operations,writes,downloads,listeners,async render(){
     let tree;
     for(let i=0;i<4;i++){
       cursor=0;effects=[];tree=context.App();effects.forEach(fn=>fn());
@@ -94,7 +108,7 @@ test('weekly footer sits after the hour grid and scrolls in alignment on mobile'
     assert.equal(grid.props.style.minWidth,820);
   }
   assert.equal(row.children.length,8);
-  assert.ok(nodes(tree).some(n=>n.props.title?.includes('Actividad ficticia del laboratorio')||n.props.title?.includes('Actividad ficticia')));
+  assert.ok(nodes(tree).some(n=>n.props.title?.includes('Actividad ficticia')));
   assert.equal(h.storage.getItem(key),null);
 });
 test('saves, edits past days and recovers weekly totals and explicit zero without touching Supabase',async()=>{
@@ -175,4 +189,40 @@ test('a later edit reads the latest saved map and preserves dates written by ano
   other.call('saveLocalBarrileteDay',storage,past,{long:2,short:0});
   h.call('saveLocalBarrileteDay',storage,day,{long:3,short:1});
   assert.deepEqual(plain(h.call('readLocalBarriletes',storage)),{[day]:{long:3,short:1},[past]:{long:2,short:0}});
+});
+
+test('the calendar opens only after a verified retry, and its usual editing flows still write',async()=>{
+  let canRead=false;
+  const h=app(memory(),1200,data=>({data:canRead?data:data.filter(row=>row.key!=='weeklyStars'),error:null}));
+  let tree=await h.render();
+  assert.ok(nodes(tree).some(n=>content(n)==='No se pudo verificar el historial.'));
+  assert.equal(button(tree,'Semana'),undefined);
+  assert.equal(button(tree,'+ Agregar'),undefined);
+  assert.deepEqual(h.writes,[]);
+  assert.deepEqual(h.operations,['cronograma']);
+
+  canRead=true;
+  button(tree,'Reintentar carga').props.onClick();
+  tree=await week(h);
+  assert.ok(nodes(tree).some(n=>n.props.title?.includes('Actividad ficticia')));
+  assert.ok(nodes(tree).some(n=>content(n)==='1/7'));
+  assert.deepEqual(h.writes,[]);
+
+  nodes(tree).find(n=>n.props['aria-label']==='Meta ficticia: No cumplida').props.onClick();
+  tree=await h.render();
+  assert.ok(h.writes.some(row=>row.key==='weeklyMissions'&&row.value[day][0].done));
+  const card=nodes(tree).find(n=>n.props.title?.includes('Actividad ficticia'));
+  nodes(card).find(n=>n.type==='button'&&n.props.title==='Completar').props.onClick({
+    stopPropagation(){},currentTarget:{getBoundingClientRect:()=>({left:0,top:0,width:14,height:14})}
+  });
+  tree=await h.render();
+  assert.ok(h.writes.some(row=>row.key==='events'&&row.value[day][0].done===false));
+  assert.ok(h.writes.some(row=>row.key==='weeklyStars'&&row.value[day].length===0));
+
+  nodes(tree).find(n=>n.type==='button'&&content(n).includes('Misiones secundarias')).props.onClick();
+  tree=await h.render();
+  nodes(tree).find(n=>n.type==='textarea').props.onChange({target:{value:'Acción ficticia'}});
+  button(await h.render(),'Agregar acciones').props.onClick();
+  await h.render();
+  assert.ok(h.writes.some(row=>row.key==='secondaryMissions'&&row.value[0].text==='Acción ficticia'));
 });
